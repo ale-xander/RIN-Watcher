@@ -1,0 +1,60 @@
+name: Fetch MIDAS data
+
+# Runs the daily MIDAS fetch inside the Render web service, which is the only
+# place that can see the persistent disk (/data). A Render Cron Job can't be used
+# for this: a disk is attached to exactly one service, so the fetch has to run in
+# the API process that owns /data/rin_watch.db.
+
+on:
+  schedule:
+    # 12:00 UTC daily (5:00 AM PST / 6:00 AM PDT).
+    - cron: "0 12 * * *"
+  workflow_dispatch:
+
+# Don't stack runs: a second trigger while a fetch is in flight gets HTTP 409.
+concurrency:
+  group: fetch-midas
+  cancel-in-progress: false
+
+# The job only makes an outbound HTTPS request; no repo access needed.
+permissions: {}
+
+jobs:
+  trigger:
+    name: POST /api/admin/fetch
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Queue the Render fetch
+        env:
+          FETCH_SECRET: ${{ secrets.FETCH_SECRET }}
+          RENDER_API_URL: ${{ secrets.RENDER_API_URL }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${FETCH_SECRET}" ] || [ -z "${RENDER_API_URL}" ]; then
+            echo "::error::Set the FETCH_SECRET and RENDER_API_URL repository secrets."
+            exit 1
+          fi
+
+          # Tolerate a trailing slash in RENDER_API_URL.
+          api_url="${RENDER_API_URL%/}"
+
+          # The endpoint queues the fetch and answers 202 immediately, so this
+          # request is fast even though the fetch itself takes several minutes.
+          status=$(curl -sS --max-time 30 -o response.json -w '%{http_code}' \
+            -X POST \
+            -H "Authorization: Bearer ${FETCH_SECRET}" \
+            "${api_url}/api/admin/fetch")
+
+          cat response.json
+          echo
+
+          case "${status}" in
+            202) echo "Fetch queued (HTTP ${status})." ;;
+            409) echo "A fetch is already running (HTTP ${status}); treating as success." ;;
+            *)
+              echo "::error::Unexpected response HTTP ${status} from ${api_url}/api/admin/fetch."
+              exit 1
+              ;;
+          esac

@@ -12,7 +12,6 @@ import os
 import sqlite3
 from contextlib import closing
 from pathlib import Path
-from typing import Optional, Union
 
 BACKEND_DIR = Path(__file__).resolve().parent
 DEFAULT_DB_PATH = BACKEND_DIR / "rin_watch.db"
@@ -43,14 +42,20 @@ CREATE TABLE IF NOT EXISTS status (
 );
 """
 
-DbPath = Union[str, Path, None]
+DbPath = str | Path | None
 
 
 def get_db_path(db_path: DbPath = None) -> Path:
-    """Resolve the database location (explicit argument > env var > default)."""
+    """Resolve the database location (explicit argument > env var > default).
+
+    ``RIN_WATCH_DB`` wins over ``BACKEND_DIR / "rin_watch.db"``; production sets
+    it to the mounted persistent disk (e.g. ``/data/rin_watch.db``). A blank or
+    whitespace-only value is ignored so it can't resolve to the current dir.
+    """
     if db_path is not None:
         return Path(db_path).expanduser()
-    return Path(os.getenv("RIN_WATCH_DB", str(DEFAULT_DB_PATH))).expanduser()
+    env_path = (os.getenv("RIN_WATCH_DB") or "").strip()
+    return Path(env_path).expanduser() if env_path else DEFAULT_DB_PATH
 
 
 def get_connection(db_path: DbPath = None) -> sqlite3.Connection:
@@ -91,7 +96,7 @@ def upsert_rin(
     conn: sqlite3.Connection,
     rin: str,
     provider_code: str,
-    rate_name: Optional[str] = None,
+    rate_name: str | None = None,
 ) -> None:
     """Insert a RIN or refresh it, keeping the old rate name if none is given."""
     conn.execute(
@@ -117,7 +122,9 @@ def delete_test_rins(conn: sqlite3.Connection, suffix: str = "-TEST") -> int:
     # Delete the status rows explicitly as well, so the cleanup also works on a
     # connection that was opened without PRAGMA foreign_keys = ON.
     conn.execute("DELETE FROM status WHERE UPPER(rin) LIKE ?", (pattern,))
-    deleted = conn.execute("DELETE FROM rins WHERE UPPER(rin) LIKE ?", (pattern,)).rowcount
+    deleted = conn.execute(
+        "DELETE FROM rins WHERE UPPER(rin) LIKE ?", (pattern,)
+    ).rowcount
     return deleted
 
 
@@ -126,13 +133,21 @@ def save_status(
     rin: str,
     has_value_today: bool,
     fetched_at: str,
-    last_success_date: Optional[str] = None,
+    last_success_date: str | None = None,
 ) -> None:
     """Write today's status for a RIN.
 
-    ``last_success_date`` is only supplied when a value was found today; when it
-    is None the previously stored date is preserved.
+    A successful check always records a success date, so it can never leave the
+    column NULL: ``last_success_date`` when supplied (``fetch_data`` passes the
+    Pacific date it checked, i.e. today), otherwise the ``YYYY-MM-DD`` prefix of
+    ``fetched_at``. A failed check (``has_value_today`` false) only overwrites
+    the stored date when a date is supplied, keeping the last known good date.
     """
+    if has_value_today:
+        success_date = last_success_date or fetched_at[:10]
+    else:
+        success_date = last_success_date
+
     conn.execute(
         """
         INSERT INTO status (rin, has_value_today, last_success_date, fetched_at)
@@ -142,7 +157,7 @@ def save_status(
             last_success_date = COALESCE(excluded.last_success_date, status.last_success_date),
             fetched_at = excluded.fetched_at
         """,
-        (rin, 1 if has_value_today else 0, last_success_date, fetched_at),
+        (rin, 1 if has_value_today else 0, success_date, fetched_at),
     )
 
 

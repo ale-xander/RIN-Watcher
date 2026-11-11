@@ -4,7 +4,11 @@ import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { AlertTriangle, Check, Copy } from "lucide-react";
 
-const DASHBOARD_URL = "http://localhost:8000/api/dashboard";
+const API_BASE_URL = (
+  process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000"
+).replace(/\/+$/, "");
+
+const DASHBOARD_URL = `${API_BASE_URL}/api/dashboard`;
 
 const PROVIDERS = [
   { code: "pge", label: "PG&E" },

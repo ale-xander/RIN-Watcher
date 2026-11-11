@@ -1,0 +1,14 @@
+{
+  // The virtualenv lives under backend/, so point Pylance at the backend
+  // modules and its site-packages even when the workspace interpreter is a
+  // system Python installation.
+  "python.defaultInterpreterPath": "${workspaceFolder}/backend/.venv/bin/python",
+  "python.analysis.extraPaths": [
+    "${workspaceFolder}/backend",
+    // Fallback for workspaces that still have a system interpreter selected.
+    // Matches the Python version used to create backend/.venv.
+    "${workspaceFolder}/backend/.venv/lib/python3.14/site-packages"
+  ],
+  // @apply/@theme/@utility are Tailwind directives, not unknown CSS at-rules.
+  "css.lint.unknownAtRules": "ignore"
+}

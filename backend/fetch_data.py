@@ -12,8 +12,13 @@ the database is deleted on every run (real RINs that dropped out of the list are
 kept).
 
 Usage:
-    python fetch_data.py [--db rin_watch.db]
-    python fetch_data.py --clean-test-rins [--db rin_watch.db]
+    python fetch_data.py [--db /path/to/rin_watch.db]
+    python fetch_data.py --clean-test-rins [--db /path/to/rin_watch.db]
+
+The database location is resolved as: ``--db`` argument, then the
+``RIN_WATCH_DB`` environment variable (set to ``/data/rin_watch.db`` in
+production), then ``backend/rin_watch.db``. ``main.py`` uses the same helper,
+so the API server always reads the file this script writes.
 """
 
 from __future__ import annotations
@@ -23,9 +28,9 @@ import math
 import sys
 import time
 from contextlib import closing
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import pytz
 import requests
@@ -35,6 +40,7 @@ from database import (
     BACKEND_DIR,
     delete_test_rins,
     get_connection,
+    get_db_path,
     init_db,
     save_status,
     upsert_rin,
@@ -61,10 +67,10 @@ def today_pacific() -> date:
 
 
 def utc_timestamp() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
-def parse_date_start(raw: Any) -> Optional[date]:
+def parse_date_start(raw: Any) -> date | None:
     """Return the Pacific date for a DateStart value, or None if unparseable."""
     if not isinstance(raw, str) or not raw.strip():
         return None
@@ -72,7 +78,7 @@ def parse_date_start(raw: Any) -> Optional[date]:
     try:
         if len(text) == 10:  # MIDAS realtime rows use "YYYY-MM-DD"
             return date.fromisoformat(text)
-        moment = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        moment = datetime.fromisoformat(text)
     except ValueError:
         return None
     if moment.tzinfo is None:
@@ -186,10 +192,10 @@ def rin_entries(payload: Any) -> list[tuple[str, str]]:
     is kept.
     """
     if not isinstance(payload, dict):
-        raise RuntimeError("unexpected RIN list payload (expected a JSON object)")
+        raise TypeError("unexpected RIN list payload (expected a JSON object)")
     rates = payload.get("Rates")
     if not isinstance(rates, list):
-        raise RuntimeError("RIN list payload is missing the 'Rates' array")
+        raise TypeError("RIN list payload is missing the 'Rates' array")
 
     rows: list[tuple[str, str]] = []
     seen: set[str] = set()
@@ -233,7 +239,7 @@ def fetch_rin_list(session: requests.Session) -> list[tuple[str, str]]:
     return rin_entries(payload)
 
 
-def process(db_path: Optional[Path] = None) -> int:
+def process(db_path: Path | None = None) -> int:
     """Fetch the RIN list, then run the realtime fetch for every RIN.
 
     Returns a shell exit code.
@@ -248,7 +254,7 @@ def process(db_path: Optional[Path] = None) -> int:
     )
     try:
         entries = fetch_rin_list(session)
-    except RuntimeError as exc:
+    except (RuntimeError, TypeError) as exc:
         print(f"error: could not load the RIN list: {exc}", file=sys.stderr)
         return 1
 
@@ -289,9 +295,13 @@ def process(db_path: Optional[Path] = None) -> int:
 
                 payload = fetch_rate(session, rin)
                 has_value, dated, valued = evaluate_payload(payload, target_date)
-                api_rate_name = payload.get("RateName") if isinstance(payload, dict) else None
+                api_rate_name = (
+                    payload.get("RateName") if isinstance(payload, dict) else None
+                )
                 if not rate_name and api_rate_name:
-                    upsert_rin(conn, rin, PROVIDER_CODE, str(api_rate_name).strip() or None)
+                    upsert_rin(
+                        conn, rin, PROVIDER_CODE, str(api_rate_name).strip() or None
+                    )
                 save_status(
                     conn,
                     rin,
@@ -305,7 +315,7 @@ def process(db_path: Optional[Path] = None) -> int:
                 failures += 1
                 print(f"{prefix}: ERROR {exc}", file=sys.stderr, flush=True)
                 continue
-            except Exception as exc:  # keep the run going on unexpected payloads
+            except Exception as exc:  # noqa: BLE001 - one bad RIN must not stop the batch
                 conn.rollback()
                 failures += 1
                 print(
@@ -319,7 +329,9 @@ def process(db_path: Optional[Path] = None) -> int:
                 with_value += 1
                 detail = f"{valued}/{dated} entries for {target_date.isoformat()} have a value"
             elif dated:
-                detail = f"{dated} entries for {target_date.isoformat()}, none with a value"
+                detail = (
+                    f"{dated} entries for {target_date.isoformat()}, none with a value"
+                )
             else:
                 detail = f"no entries dated {target_date.isoformat()}"
             print(f"{prefix}: has_value_today={int(has_value)} ({detail})", flush=True)
@@ -331,7 +343,7 @@ def process(db_path: Optional[Path] = None) -> int:
     return 0 if failures == 0 else 1
 
 
-def clean_test_rins(db_path: Optional[Path] = None) -> int:
+def clean_test_rins(db_path: Path | None = None) -> int:
     """Delete every RIN ending in ``RIN_TEST_SUFFIX`` from the database.
 
     Only test RINs are removed; real RINs are never pruned. Returns a shell exit
@@ -350,7 +362,7 @@ def clean_test_rins(db_path: Optional[Path] = None) -> int:
     return 0
 
 
-def main(argv: Optional[list[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Fetch realtime MIDAS values and update RIN Watch status."
     )
@@ -369,9 +381,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         ),
     )
     args = parser.parse_args(argv)
+    # Single resolution point for the whole script: --db, else RIN_WATCH_DB,
+    # else backend/rin_watch.db. main.py calls the same helper.
+    db_path = get_db_path(args.db)
     if args.clean_test_rins:
-        return clean_test_rins(args.db)
-    return process(args.db)
+        return clean_test_rins(db_path)
+    return process(db_path)
 
 
 if __name__ == "__main__":

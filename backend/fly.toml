@@ -6,6 +6,19 @@
 app = 'rin-watch-api-alex'
 primary_region = 'sjc'
 
+# Non-secret runtime config. Secrets (FETCH_SECRET, ...) belong in
+# `fly secrets set` — this file is committed to git.
+[env]
+  # SQLite file lives on the mounted volume (see [mounts]). Without this the app
+  # falls back to /app/rin_watch.db inside the container, so the volume is never
+  # used and every deploy/machine restart discards the fetched data.
+  RIN_WATCH_DB = "/data/rin_watch.db"
+
+  # Public origin of the deployed frontend, needed for CORS. Fill in once the
+  # frontend URL is known (comma-separate several origins).
+  # CORS_ORIGINS = "https://your-frontend.example"
+  # FRONTEND_URL = "https://your-frontend.example"
+
 [build]
 [http_service]
   internal_port = 8000

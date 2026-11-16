@@ -2,8 +2,9 @@ name: Fetch MIDAS data
 
 on:
   schedule:
-    # 12:00 UTC daily (5:00 AM PST / 6:00 AM PDT).
-    - cron: "0 12 * * *"
+    # 12:15 UTC daily (4:15 AM PST / 5:15 AM PDT).
+    # Offset from the top of the hour to avoid GitHub's high-load cron drops.
+    - cron: "17 12 * * *"
   workflow_dispatch:
 
 concurrency:
@@ -16,16 +17,8 @@ jobs:
   trigger:
     name: POST /api/admin/fetch
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
-      - name: Diagnostic - Check secret lengths
-        env:
-          FETCH_SECRET: ${{ secrets.FETCH_SECRET }}
-          RENDER_API_URL: ${{ secrets.RENDER_API_URL }}
-        run: |
-          echo "FETCH_SECRET length: ${#FETCH_SECRET}"
-          echo "RENDER_API_URL: '${RENDER_API_URL}'"
-
       - name: Queue the API fetch
         env:
           FETCH_SECRET: ${{ secrets.FETCH_SECRET }}
@@ -56,3 +49,6 @@ jobs:
               exit 1
               ;;
           esac
+
+      - name: Keep Fly.io awake during the background fetch
+        run: sleep 180

@@ -3,7 +3,9 @@
 The database lives next to this file by default (backend/rin_watch.db). Set the
 RIN_WATCH_DB environment variable to store it somewhere else.
 
-Run ``python database.py`` to create/refresh the schema.
+Run ``python database.py`` to create/refresh the schema. New columns are defined
+in ``MIGRATIONS`` rather than in ``SCHEMA`` so that databases created before the
+column existed pick it up too; ``init_db`` applies them idempotently.
 """
 
 from __future__ import annotations
@@ -42,7 +44,39 @@ CREATE TABLE IF NOT EXISTS status (
 );
 """
 
+# Columns added after the first release. ``SCHEMA`` only creates missing tables,
+# so new columns have to be applied as ``ALTER TABLE`` statements to databases
+# that already exist. Entries are ``(table, column, ddl)``: ``init_db`` skips a
+# migration when ``PRAGMA table_info`` already lists its column (SQLite has no
+# ``ADD COLUMN IF NOT EXISTS``), which makes every run idempotent.
+#
+# New databases are migrated too -- the columns are intentionally not inlined in
+# ``SCHEMA`` so fresh and upgraded files always end up with the same layout.
+# Existing rows survive: every column is either nullable or has a default.
+MIGRATIONS = (
+    # Prefix of the RIN itself, e.g. PGPG, PGXX, XXMB.
+    ("rins", "prefix", "ALTER TABLE rins ADD COLUMN prefix TEXT NOT NULL DEFAULT ''"),
+    # Tariff / rate from the PG&E RIN spreadsheet, e.g. ETOUC, B1, AGFA.
+    ("rins", "tariff", "ALTER TABLE rins ADD COLUMN tariff TEXT"),
+    # JSON array string of enrollment codes, e.g. '["CARE","PGE-FS"]'.
+    ("rins", "enrollment_codes", "ALTER TABLE rins ADD COLUMN enrollment_codes TEXT"),
+    # ag | non_res | resid | nbt | other: drives the dashboard tab a RIN shows up in.
+    (
+        "rins",
+        "category",
+        "ALTER TABLE rins ADD COLUMN category TEXT NOT NULL DEFAULT 'other'",
+    ),
+    # 0 = soft-deleted: hidden from the dashboard but kept for history.
+    (
+        "rins",
+        "is_active",
+        "ALTER TABLE rins ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1 "
+        "CHECK (is_active IN (0, 1))",
+    ),
+)
+
 DbPath = str | Path | None
+Migration = tuple[str, str, str]
 
 
 def get_db_path(db_path: DbPath = None) -> Path:
@@ -69,16 +103,52 @@ def get_connection(db_path: DbPath = None) -> sqlite3.Connection:
 
 
 def init_db(db_path: DbPath = None) -> Path:
-    """Create the tables (if missing) and seed the known providers."""
+    """Create the tables (if missing), apply pending migrations, seed providers."""
     path = get_db_path(db_path)
     with closing(get_connection(path)) as conn:
         conn.executescript(SCHEMA)
+        added = apply_migrations(conn)
+        if added:
+            print(f"Applied {len(added)} schema migration(s): {', '.join(added)}")
         conn.executemany(
             "INSERT OR IGNORE INTO providers (code, display_name) VALUES (?, ?)",
             PROVIDERS,
         )
         conn.commit()
     return path
+
+
+def table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    """Return the column names of ``table`` (empty when it does not exist).
+
+    ``table`` always comes from ``MIGRATIONS``, never from user input, so the
+    f-string is safe here -- SQLite does not accept PRAGMA arguments as ``?``.
+    """
+    return {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+
+
+def apply_migrations(
+    conn: sqlite3.Connection,
+    migrations: tuple[Migration, ...] = MIGRATIONS,
+) -> list[str]:
+    """Run the ``ALTER TABLE`` statements whose column is still missing.
+
+    Returns the ``table.column`` names added, so callers (and ``init_db``) can
+    log what changed. Running this twice is a no-op: a column that already
+    exists is skipped instead of raising "duplicate column name".
+    """
+    added: list[str] = []
+    known: dict[str, set[str]] = {}
+    for table, column, ddl in migrations:
+        if table not in known:
+            known[table] = table_columns(conn, table)
+        columns = known[table]
+        if column in columns:
+            continue
+        conn.execute(ddl)
+        columns.add(column)
+        added.append(f"{table}.{column}")
+    return added
 
 
 def upsert_provider(conn: sqlite3.Connection, code: str, display_name: str) -> None:

@@ -30,8 +30,6 @@ const DEFAULT_SORT: Sort = { column: "rin", direction: "asc" };
 const SEGMENT_ORDER: Segment[] = ["ag", "non_res", "resid", "other"];
 /** Chip order: the segments, with the NBT program chip before Other. */
 const CATEGORY_ORDER: Category[] = ["ag", "non_res", "resid", "nbt", "other"];
-/** Secondary chips rendered while the NBT chip is active. */
-const NBT_SUBCATEGORY_ORDER: Segment[] = ["ag", "non_res", "resid"];
 
 const CATEGORY_LABELS: Record<Category, { chip: string; group: string }> = {
   ag: { chip: "AG", group: "AG" },
@@ -50,7 +48,6 @@ type Segment = "ag" | "non_res" | "resid" | "other";
 /** The four segments plus ``nbt``, which is a program and not a segment. */
 type Category = Segment | "nbt";
 type CategoryFilter = "all" | Category;
-type NbtSubCategory = "all" | Segment;
 type SortColumn = "rin" | "tariff" | "enrollment" | "last_success";
 type SortDirection = "asc" | "desc";
 type Sort = { column: SortColumn; direction: SortDirection };
@@ -96,7 +93,6 @@ type DashboardState =
 type RinGroup = { category: Segment; label: string; rows: RinEntry[] };
 
 type CategoryChip = { id: CategoryFilter; label: string; count: number };
-type NbtSubChip = { id: NbtSubCategory; label: string; count: number };
 
 /**
  * Map an unknown API value onto the four segments the dashboard groups by.
@@ -309,8 +305,6 @@ export default function Page() {
   const [providerId, setProviderId] = useState<string>(DEFAULT_PROVIDER_ID);
   const [component, setComponent] = useState<Component>(DEFAULT_COMPONENT);
   const [category, setCategory] = useState<CategoryFilter>("all");
-  const [nbtSubCategory, setNbtSubCategory] =
-    useState<NbtSubCategory>("all");
   const [viewMode, setViewMode] = useState<ViewMode>("failed");
   const [sort, setSort] = useState<Sort>(DEFAULT_SORT);
   const [searchQuery, setSearchQuery] = useState("");
@@ -456,13 +450,6 @@ export default function Page() {
     setCollapsedGroups(new Set());
   }, [providerId, requestComponent]);
 
-  // The NBT sub-filter only means something while the NBT chip is active, and
-  // its segments change with the payload, so it never survives a category or
-  // provider/component switch.
-  useEffect(() => {
-    setNbtSubCategory("all");
-  }, [category, providerId, requestComponent]);
-
   // Switching between the failed/successful lists invalidates the selection.
   useEffect(() => {
     setCheckedRins(new Set());
@@ -509,25 +496,6 @@ export default function Page() {
     return counts;
   }, [failedRins, successfulRins]);
 
-  // Segment split of the NBT RINs: the counts behind the secondary chip row.
-  const nbtSubCounts = useMemo(() => {
-    const counts: Record<NbtSubCategory, number> = {
-      all: 0,
-      ag: 0,
-      non_res: 0,
-      resid: 0,
-      other: 0,
-    };
-    for (const entry of [...failedRins, ...successfulRins]) {
-      if (!isNbt(entry)) {
-        continue;
-      }
-      counts.all += 1;
-      counts[entry.category] += 1;
-    }
-    return counts;
-  }, [failedRins, successfulRins]);
-
   const viewEntries = useMemo(
     () => (viewMode === "failed" ? failedRins : successfulRins),
     [viewMode, failedRins, successfulRins],
@@ -558,12 +526,9 @@ export default function Page() {
     const query = searchQuery.trim().toLowerCase();
     const filtered = viewEntries.filter((entry) => {
       if (category === "nbt") {
-        // NBT is a program: it comes from the enrollment codes, and the
-        // secondary chips then narrow the result down to one segment.
+        // NBT is a program, detected from the enrollment codes. The table
+        // groups the result by segment rather than filtering it.
         if (!isNbt(entry)) {
-          return false;
-        }
-        if (nbtSubCategory !== "all" && entry.category !== nbtSubCategory) {
           return false;
         }
       } else if (category !== "all" && entry.category !== category) {
@@ -581,12 +546,11 @@ export default function Page() {
       );
     });
     return sortEntries(filtered, sort);
-  }, [viewEntries, category, nbtSubCategory, searchQuery, sort]);
+  }, [viewEntries, category, searchQuery, sort]);
 
-  // "All" (every segment) and "All NBT" (every segment, NBT only) stay grouped;
-  // any narrower chip is a flat list.
-  const grouped =
-    category === "all" || (category === "nbt" && nbtSubCategory === "all");
+  // "All" (every segment) and NBT (every segment, NBT only) stay grouped; a
+  // single segment chip is a flat list.
+  const grouped = category === "all" || category === "nbt";
 
   const groups = useMemo<RinGroup[]>(() => {
     if (!grouped) {
@@ -614,10 +578,7 @@ export default function Page() {
     const inCategory = [...data.failed_rins, ...data.successful_rins].filter(
       (entry) => {
         if (category === "nbt") {
-          return (
-            isNbt(entry) &&
-            (nbtSubCategory === "all" || entry.category === nbtSubCategory)
-          );
+          return isNbt(entry);
         }
         return entry.category === category;
       },
@@ -630,7 +591,7 @@ export default function Page() {
       withValue,
       withoutValue: inCategory.length - withValue,
     };
-  }, [data, category, nbtSubCategory]);
+  }, [data, category]);
 
   const chips = useMemo<CategoryChip[]>(() => {
     const list: CategoryChip[] = [
@@ -646,18 +607,6 @@ export default function Page() {
     return list.filter((chip) => chip.count > 0 || chip.id === category);
   }, [categoryCounts, category]);
 
-  const nbtChips = useMemo<NbtSubChip[]>(() => {
-    const list: NbtSubChip[] = [
-      { id: "all", label: "All NBT", count: nbtSubCounts.all },
-      ...NBT_SUBCATEGORY_ORDER.map((id) => ({
-        id,
-        label: CATEGORY_LABELS[id].chip,
-        count: nbtSubCounts[id],
-      })),
-    ];
-    return list.filter((chip) => chip.count > 0 || chip.id === nbtSubCategory);
-  }, [nbtSubCounts, nbtSubCategory]);
-
   useEffect(() => {
     if (!data) {
       return;
@@ -666,17 +615,6 @@ export default function Page() {
       setCategory("all");
     }
   }, [data, category, categoryCounts]);
-
-  // Same guard for the secondary chips: a refresh can drop the segment that is
-  // currently selected, which would leave an empty table with no way back.
-  useEffect(() => {
-    if (!data || category !== "nbt") {
-      return;
-    }
-    if (nbtSubCategory !== "all" && nbtSubCounts[nbtSubCategory] === 0) {
-      setNbtSubCategory("all");
-    }
-  }, [data, category, nbtSubCategory, nbtSubCounts]);
 
   // Checked rows win; otherwise copy what is on screen, in sort order.
   const copyRows = useMemo(
@@ -748,11 +686,7 @@ export default function Page() {
   const isLoading = providersLoading || dashboardLoading;
   const lastChecked = data?.last_checked ?? null;
   const categoryLabel =
-    category === "all"
-      ? null
-      : category === "nbt" && nbtSubCategory !== "all"
-        ? `NBT ${CATEGORY_LABELS[nbtSubCategory].group}`
-        : CATEGORY_LABELS[category].group;
+    category === "all" ? null : CATEGORY_LABELS[category].group;
   const emptyMessage =
     searchQuery.trim().length > 0
       ? "No RINs match your search."
@@ -821,9 +755,6 @@ export default function Page() {
               chips={chips}
               active={category}
               onChange={setCategory}
-              subChips={category === "nbt" ? nbtChips : null}
-              subActive={nbtSubCategory}
-              onSubChange={setNbtSubCategory}
             />
           ) : null}
 
@@ -976,38 +907,30 @@ function ComponentToggle({
   );
 }
 
-/**
- * Shared chip button. ``secondary`` styles the NBT segment row, which sits
- * below and reports into the main filter row.
- */
+/** Shared chip button for the category filter row. */
 function FilterChip({
   label,
   count,
   active,
   onClick,
-  secondary = false,
 }: {
   label: string;
   count: number;
   active: boolean;
   onClick: () => void;
-  secondary?: boolean;
 }) {
-  const activeClassName = secondary
-    ? "border-blue-600 bg-blue-600 text-white"
-    : "border-gray-900 bg-gray-900 text-white";
-  const idleClassName = secondary
-    ? "border-gray-200 bg-white text-gray-500 hover:border-gray-300 hover:text-gray-900"
-    : "border-gray-200 bg-white text-gray-600 hover:border-gray-300 hover:text-gray-900";
+  const activeClassName = "border-gray-900 bg-gray-900 text-white";
+  const idleClassName =
+    "border-gray-200 bg-white text-gray-600 hover:border-gray-300 hover:text-gray-900";
 
   return (
     <button
       type="button"
       onClick={onClick}
       aria-pressed={active}
-      className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1 font-medium transition-colors ${
-        secondary ? "text-[11px]" : "text-xs"
-      } ${active ? activeClassName : idleClassName}`}
+      className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-medium transition-colors ${
+        active ? activeClassName : idleClassName
+      }`}
     >
       {label}
       <span
@@ -1025,16 +948,10 @@ function CategoryChips({
   chips,
   active,
   onChange,
-  subChips = null,
-  subActive = "all",
-  onSubChange,
 }: {
   chips: CategoryChip[];
   active: CategoryFilter;
   onChange: (category: CategoryFilter) => void;
-  subChips?: NbtSubChip[] | null;
-  subActive?: NbtSubCategory;
-  onSubChange?: (category: NbtSubCategory) => void;
 }) {
   return (
     <div className="mb-6">
@@ -1053,25 +970,6 @@ function CategoryChips({
           />
         ))}
       </div>
-
-      {subChips && onSubChange ? (
-        <div
-          role="group"
-          aria-label="Filter NBT by segment"
-          className="mt-2 flex flex-wrap items-center gap-2"
-        >
-          {subChips.map((chip) => (
-            <FilterChip
-              key={chip.id}
-              label={chip.label}
-              count={chip.count}
-              active={chip.id === subActive}
-              onClick={() => onSubChange(chip.id)}
-              secondary
-            />
-          ))}
-        </div>
-      ) : null}
     </div>
   );
 }

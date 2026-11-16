@@ -30,7 +30,7 @@ const CATEGORY_ORDER: Category[] = ["ag", "non_res", "resid", "nbt", "other"];
 const CATEGORY_LABELS: Record<Category, { chip: string; group: string }> = {
   ag: { chip: "AG", group: "AG" },
   non_res: { chip: "Non-Res", group: "Non-Residential" },
-  resid: { chip: "Resid", group: "Residential" },
+  resid: { chip: "Residential", group: "Residential" },
   nbt: { chip: "NBT", group: "NBT" },
   other: { chip: "Other", group: "Other" },
 };

@@ -59,6 +59,16 @@ DIFF_KEYS = ("added", "reactivated", "updated", "unchanged", "deactivated")
 
 # Display order of the category breakdown; counts of 0 are hidden.
 CATEGORY_ORDER = ("nbt", "ag", "non_res", "resid", "other")
+# Human-readable names for the category keys; the keys themselves are the
+# values stored in the database, so they must not change.
+CATEGORY_LABELS = {
+    "nbt": "NBT",
+    "ag": "AG",
+    "non_res": "Non-Residential",
+    "resid": "Residential",
+    "other": "Other",
+}
+CATEGORY_LABEL_WIDTH = max(len(label) for label in CATEGORY_LABELS.values()) + 3
 LABEL_WIDTH = 27
 COUNT_WIDTH = 3
 MAX_WARNINGS = 20
@@ -331,7 +341,8 @@ def print_report(
         if not categories.get(name):
             continue
         note = "   ← ETOUB / blank-tariff; see warnings" if name == "other" else ""
-        print(f"  {name:<8}{categories[name]:>5}{note}")
+        label = CATEGORY_LABELS[name]
+        print(f"  {label:<{CATEGORY_LABEL_WIDTH}}{categories[name]:>5}{note}")
 
     print("Provider breakdown (of file rows):")
     providers = Counter(row["provider_code"] for row in rows)

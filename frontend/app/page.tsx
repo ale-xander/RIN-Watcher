@@ -26,6 +26,14 @@ const DEFAULT_PROVIDER_ID = "pge";
 const DEFAULT_COMPONENT: Component = "bundled";
 const DEFAULT_SORT: Sort = { column: "rin", direction: "asc" };
 
+/** PG&E component tabs, in the order the toggle renders them. */
+const COMPONENT_OPTIONS: Component[] = ["bundled", "unbundled", "hfp"];
+const COMPONENT_LABELS: Record<Component, string> = {
+  bundled: "Bundled",
+  unbundled: "Unbundled",
+  hfp: "HFP",
+};
+
 /** Table segments, in group order. NBT is a program, never a segment. */
 const SEGMENT_ORDER: Segment[] = ["ag", "non_res", "resid", "other"];
 /** Chip order: the segments, with the NBT program chip before Other. */
@@ -41,7 +49,7 @@ const CATEGORY_LABELS: Record<Category, { chip: string; group: string }> = {
 
 const EMPTY_RINS: RinEntry[] = [];
 
-type Component = "bundled" | "unbundled";
+type Component = "bundled" | "unbundled" | "hfp";
 type ViewMode = "failed" | "successful";
 /** The tariff segment a RIN belongs to. */
 type Segment = "ag" | "non_res" | "resid" | "other";
@@ -143,6 +151,11 @@ function normalizeRinEntry(raw: unknown): RinEntry | null {
   };
 }
 
+/** Narrow an API value to a component tab the dashboard can request. */
+function isComponent(value: unknown): value is Component {
+  return value === "bundled" || value === "unbundled" || value === "hfp";
+}
+
 /**
  * The API is the source of truth, but normalising the payload here keeps the
  * render tree safe: a slow/partial response can never make `.map()` explode.
@@ -171,10 +184,7 @@ function normalizeProviders(payload: unknown): Provider[] {
           ? row.label.trim()
           : id.toUpperCase(),
       components: Array.isArray(row.components)
-        ? row.components.filter(
-            (component): component is string =>
-              component === "bundled" || component === "unbundled",
-          )
+        ? row.components.filter(isComponent)
         : [],
     });
   }
@@ -324,11 +334,16 @@ export default function Page() {
     providersState.status === "ready" ? providersState.providers : [];
   const activeProvider =
     providers.find((provider) => provider.id === providerId) ?? null;
-  // Only PG&E advertises a bundled/unbundled split in /api/providers.
+  // Only PG&E advertises a component split in /api/providers.
   const showComponentToggle = (activeProvider?.components.length ?? 0) > 0;
   const requestComponent: Component | null = showComponentToggle
     ? component
     : null;
+  // HFP is a single flat list: no category chips and no group headers.
+  const isHfp = showComponentToggle && component === "hfp";
+  // Chips can't be clicked while HFP is selected, so any leftover selection is
+  // ignored instead of filtering the flat list down to nothing.
+  const activeCategory: CategoryFilter = isHfp ? "all" : category;
 
   // Tabs are driven by the API: a new CCA in the spreadsheet gets a tab
   // without a frontend release.
@@ -525,13 +540,16 @@ export default function Page() {
   const visibleRows = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
     const filtered = viewEntries.filter((entry) => {
-      if (category === "nbt") {
+      if (activeCategory === "nbt") {
         // NBT is a program, detected from the enrollment codes. The table
         // groups the result by segment rather than filtering it.
         if (!isNbt(entry)) {
           return false;
         }
-      } else if (category !== "all" && entry.category !== category) {
+      } else if (
+        activeCategory !== "all" &&
+        entry.category !== activeCategory
+      ) {
         return false;
       }
       if (!query) {
@@ -546,11 +564,13 @@ export default function Page() {
       );
     });
     return sortEntries(filtered, sort);
-  }, [viewEntries, category, searchQuery, sort]);
+  }, [viewEntries, activeCategory, searchQuery, sort]);
 
-  // "All" (every segment) and NBT (every segment, NBT only) stay grouped; a
-  // single segment chip is a flat list.
-  const grouped = category === "all" || category === "nbt";
+  // HFP has no categories, so it is always a flat list. "All" (every segment)
+  // and NBT (every segment, NBT only) stay grouped; a single segment chip is a
+  // flat list.
+  const grouped =
+    !isHfp && (activeCategory === "all" || activeCategory === "nbt");
 
   const groups = useMemo<RinGroup[]>(() => {
     if (!grouped) {
@@ -568,7 +588,7 @@ export default function Page() {
     if (!data) {
       return { total: 0, withValue: 0, withoutValue: 0 };
     }
-    if (category === "all") {
+    if (activeCategory === "all") {
       return {
         total: data.total,
         withValue: data.has_value_count,
@@ -577,10 +597,10 @@ export default function Page() {
     }
     const inCategory = [...data.failed_rins, ...data.successful_rins].filter(
       (entry) => {
-        if (category === "nbt") {
+        if (activeCategory === "nbt") {
           return isNbt(entry);
         }
-        return entry.category === category;
+        return entry.category === activeCategory;
       },
     );
     const withValue = inCategory.filter(
@@ -591,7 +611,7 @@ export default function Page() {
       withValue,
       withoutValue: inCategory.length - withValue,
     };
-  }, [data, category]);
+  }, [data, activeCategory]);
 
   const chips = useMemo<CategoryChip[]>(() => {
     const list: CategoryChip[] = [
@@ -604,17 +624,19 @@ export default function Page() {
     ];
     // Zero-count chips collapse, except the active one: keeping it visible
     // means the filter can always be switched back off.
-    return list.filter((chip) => chip.count > 0 || chip.id === category);
-  }, [categoryCounts, category]);
+    return list.filter(
+      (chip) => chip.count > 0 || chip.id === activeCategory,
+    );
+  }, [categoryCounts, activeCategory]);
 
   useEffect(() => {
     if (!data) {
       return;
     }
-    if (category !== "all" && categoryCounts[category] === 0) {
+    if (activeCategory !== "all" && categoryCounts[activeCategory] === 0) {
       setCategory("all");
     }
-  }, [data, category, categoryCounts]);
+  }, [data, activeCategory, categoryCounts]);
 
   // Checked rows win; otherwise copy what is on screen, in sort order.
   const copyRows = useMemo(
@@ -686,11 +708,11 @@ export default function Page() {
   const isLoading = providersLoading || dashboardLoading;
   const lastChecked = data?.last_checked ?? null;
   const categoryLabel =
-    category === "all" ? null : CATEGORY_LABELS[category].group;
+    activeCategory === "all" ? null : CATEGORY_LABELS[activeCategory].group;
   const emptyMessage =
     searchQuery.trim().length > 0
       ? "No RINs match your search."
-      : categoryLabel && categoryCounts[category] > 0
+      : categoryLabel && categoryCounts[activeCategory] > 0
         ? viewMode === "failed"
           ? `No failed ${categoryLabel} RINs — all caught up 🎉`
           : `No successful ${categoryLabel} RINs yet.`
@@ -750,7 +772,7 @@ export default function Page() {
             />
           ) : null}
 
-          {data ? (
+          {data && !isHfp ? (
             <CategoryChips
               chips={chips}
               active={category}
@@ -884,7 +906,7 @@ function ComponentToggle({
         aria-label="PG&E component"
         className="inline-flex rounded-lg border border-gray-200 bg-white p-0.5 shadow-sm"
       >
-        {(["bundled", "unbundled"] as const).map((option) => {
+        {COMPONENT_OPTIONS.map((option) => {
           const isActive = option === component;
           return (
             <button
@@ -892,13 +914,13 @@ function ComponentToggle({
               type="button"
               onClick={() => onChange(option)}
               aria-pressed={isActive}
-              className={`rounded-md px-3 py-1 text-xs font-medium capitalize transition-colors ${
+              className={`rounded-md px-3 py-1 text-xs font-medium transition-colors ${
                 isActive
                   ? "bg-gray-900 text-white shadow-sm"
                   : "text-gray-600 hover:text-gray-900"
               }`}
             >
-              {option}
+              {COMPONENT_LABELS[option]}
             </button>
           );
         })}

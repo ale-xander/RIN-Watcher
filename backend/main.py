@@ -5,8 +5,8 @@ Run with:  uvicorn main:app --reload --port 8000
 
 GET /api/providers lists the provider tabs that have active RINs.
 GET /api/dashboard/{provider_code} returns one provider's status summary; pass
-``?component=bundled`` or ``?component=unbundled`` to split PG&E's PGPG/PGXX
-RINs.
+``?component=bundled``, ``?component=unbundled`` or ``?component=hfp`` to split
+PG&E's PGPG/PGXX RINs and its HFP (Hourly Flex Pricing) RINs.
 POST /api/admin/fetch queues a MIDAS fetch in the background; it is guarded by
 the FETCH_SECRET environment variable and returns 202 immediately.
 """
@@ -51,12 +51,18 @@ PROVIDER_LABELS = {
     "pce": "PCE",
 }
 
-# PG&E RINs are split across two tabs by prefix: PGPG is bundled (PG&E supplies
-# both delivery and generation) and PGXX is unbundled (a CCA supplies the
-# generation; the RIN itself is still owned/fetched by PG&E). CCAs have no such
-# split, so ``?component=`` is ignored for them.
+# PG&E RINs are split across three tabs: PGPG is bundled (PG&E supplies both
+# delivery and generation), PGXX is unbundled (a CCA supplies the generation;
+# the RIN itself is still owned/fetched by PG&E) and HFP is the Hourly Flex
+# Pricing rate, which lives in MIDAS only (no RIN spreadsheet rows) and is
+# therefore identified by rate name instead of prefix. CCAs have no such split,
+# so ``?component=`` is ignored for them.
 PGE_PROVIDER_CODE = "pge"
 COMPONENT_PREFIXES = {"bundled": "PGPG", "unbundled": "PGXX"}
+HFP_COMPONENT = "hfp"
+HFP_RATE_NAME = "HFP - RTP"
+# Tab order advertised by /api/providers and accepted by /api/dashboard.
+PGE_COMPONENTS = (*COMPONENT_PREFIXES, HFP_COMPONENT)
 
 # One fetch at a time: concurrent runs would fight over the same SQLite file and
 # hammer the MIDAS API. Acquired by the endpoint, released by the worker.
@@ -185,7 +191,7 @@ def get_providers() -> list[dict[str, Any]]:
 
     Only providers with at least one ``is_active = 1`` RIN are returned, so a
     CCA that disappears from the spreadsheet also loses its tab. PG&E advertises
-    its bundled/unbundled split through ``components``; CCAs return an empty
+    its bundled/unbundled/HFP split through ``components``; CCAs return an empty
     list because each one owns a single RIN prefix.
     """
     with closing(get_connection(DB_PATH)) as conn:
@@ -200,9 +206,7 @@ def get_providers() -> list[dict[str, Any]]:
         {
             "id": code,
             "label": PROVIDER_LABELS.get(code, code.upper()),
-            "components": (
-                list(COMPONENT_PREFIXES) if code == PGE_PROVIDER_CODE else []
-            ),
+            "components": list(PGE_COMPONENTS) if code == PGE_PROVIDER_CODE else [],
         }
         for code in sorted(codes, key=_provider_sort_key)
     ]
@@ -215,41 +219,43 @@ def get_dashboard(
         str | None,
         Query(
             description=(
-                "PG&E only: 'bundled' (PGPG) or 'unbundled' (PGXX). Ignored for CCAs."
+                "PG&E only: 'bundled' (PGPG), 'unbundled' (PGXX) or 'hfp'"
+                " (HFP - RTP). Ignored for CCAs."
             )
         ),
     ] = None,
 ) -> dict[str, Any]:
     """Status summary for one provider, optionally one PG&E component.
 
-    ``?component=bundled`` keeps only PGPG RINs and ``?component=unbundled``
-    only PGXX RINs. Without a component (or for a CCA, which has no split) all
-    of the provider's active RINs are returned.
+    ``?component=bundled`` keeps only PGPG RINs, ``?component=unbundled`` only
+    PGXX RINs and ``?component=hfp`` only RINs whose rate name is
+    ``HFP - RTP`` (HFP has no prefix of its own). Without a component (or for a
+    CCA, which has no split) all of the provider's active RINs are returned.
     """
     code = provider_code.strip().lower()
     requested = (component or "").strip().lower() or None
-    if requested is not None and requested not in COMPONENT_PREFIXES:
+    if requested is not None and requested not in PGE_COMPONENTS:
         raise HTTPException(
             status_code=400,
             detail=(
                 f"Unknown component: {component}. "
-                f"Use one of: {', '.join(COMPONENT_PREFIXES)}."
+                f"Use one of: {', '.join(PGE_COMPONENTS)}."
             ),
         )
 
-    # The component only narrows PG&E; CCAs own a single prefix each, so a
-    # component sent for them is ignored instead of returning an empty tab.
-    prefix = (
-        COMPONENT_PREFIXES[requested]
-        if code == PGE_PROVIDER_CODE and requested is not None
-        else None
-    )
-
     filters = ["r.provider_code = ?", "r.is_active = 1"]
     params: list[Any] = [code]
-    if prefix is not None:
-        filters.append("r.prefix = ?")
-        params.append(prefix)
+    # The component only narrows PG&E; CCAs own a single prefix each, so a
+    # component sent for them is ignored instead of returning an empty tab.
+    if code == PGE_PROVIDER_CODE and requested is not None:
+        if requested == HFP_COMPONENT:
+            # HFP RINs share the PGPG/PGXX prefixes but have no spreadsheet
+            # row, so they are selected by rate name instead.
+            filters.append("r.rate_name = ?")
+            params.append(HFP_RATE_NAME)
+        else:
+            filters.append("r.prefix = ?")
+            params.append(COMPONENT_PREFIXES[requested])
     where_clause = " AND ".join(filters)
 
     with closing(get_connection(DB_PATH)) as conn:

@@ -7,6 +7,10 @@ it lists is inserted or refreshed, and every RIN that is active in the database
 but absent from the file is soft-deleted (``is_active = 0``). Soft-deleted RINs
 keep their status history but disappear from the dashboard.
 
+The one exception is HFP (Hourly Flex Pricing) RINs, which only exist in MIDAS
+and never in the spreadsheet (``is_hfp``): they are excluded from every
+deactivation, in both the diff and the ``UPDATE`` that soft-deletes the rest.
+
 For each row the importer derives the RIN's prefix and owning provider
 (``parse_rin``), the dashboard category (``derive_category``) and a normalized
 JSON list of enrollment codes, then writes it through ``upsert_rin``.
@@ -57,6 +61,12 @@ RIN_PATTERN = re.compile(r"^USCA-[A-Z0-9]+-[A-Z0-9]+-[A-Z0-9]+$")
 COMPARED_FIELDS = ("prefix", "provider_code", "tariff", "enrollment_codes", "category")
 DIFF_KEYS = ("added", "reactivated", "updated", "unchanged", "deactivated")
 
+# HFP (Hourly Flex Pricing) RINs are not in the spreadsheet, so the import must
+# never soft-delete them. They are identified by their MIDAS rate name or by the
+# "38xx" RIN series that carries it.
+HFP_RATE_NAME = "HFP - RTP"
+HFP_RIN_PREFIXES = ("USCA-PGPG-38", "USCA-PGXX-38")
+
 # Display order of the category breakdown; counts of 0 are hidden.
 CATEGORY_ORDER = ("nbt", "ag", "non_res", "resid", "other")
 # Human-readable names for the category keys; the keys themselves are the
@@ -79,6 +89,20 @@ def _text(value: object) -> str:
     if value is None:
         return ""
     return str(value).strip()
+
+
+def is_hfp(rin: str, rate_name: str | None) -> bool:
+    """True when the RIN is an HFP (Hourly Flex Pricing) RIN.
+
+    HFP RINs are fetched from MIDAS but are absent from ``MIDAS RIN.xlsx``, so
+    they have to survive every import: they are recognised by their rate name
+    (``HFP - RTP``) or by the ``USCA-PGPG-38…``/``USCA-PGXX-38…`` RIN series.
+    """
+    return (
+        rate_name == HFP_RATE_NAME
+        or rin.startswith(HFP_RIN_PREFIXES[0])
+        or rin.startswith(HFP_RIN_PREFIXES[1])
+    )
 
 
 def _cell(row: tuple[object, ...], index: int) -> object:
@@ -181,11 +205,15 @@ def _stored_codes(value: str | None) -> list[str]:
 
 
 def _stored_rows(conn: sqlite3.Connection) -> dict[str, dict]:
-    """Read the rins table into ``{rin: comparable state}``."""
+    """Read the rins table into ``{rin: comparable state}``.
+
+    ``rate_name`` is read only so ``is_hfp`` can protect HFP RINs from the
+    deactivation; it is not part of ``COMPARED_FIELDS``.
+    """
     stored: dict[str, dict] = {}
     for row in conn.execute(
         "SELECT rin, prefix, provider_code, tariff, enrollment_codes, category,"
-        " is_active FROM rins"
+        " rate_name, is_active FROM rins"
     ):
         stored[row["rin"]] = {
             "prefix": row["prefix"],
@@ -193,6 +221,7 @@ def _stored_rows(conn: sqlite3.Connection) -> dict[str, dict]:
             "tariff": row["tariff"] or None,
             "enrollment_codes": _stored_codes(row["enrollment_codes"]),
             "category": row["category"],
+            "rate_name": row["rate_name"],
             "is_active": row["is_active"],
         }
     return stored
@@ -204,7 +233,8 @@ def diff_against_db(conn: sqlite3.Connection, rows: list[dict]) -> dict:
     ``reactivated`` wins over ``updated`` for a soft-deleted RIN: the import
     brings it back, so "changed while hidden" is not interesting. RINs that are
     already inactive and still absent from the file stay out of the diff -- they
-    are already deactivated, so nothing changes for them.
+    are already deactivated, so nothing changes for them. HFP RINs are never
+    listed as deactivated because the import leaves them untouched.
     """
     stored = _stored_rows(conn)
     diff: dict[str, list[str] | dict[str, int]] = {key: [] for key in DIFF_KEYS}
@@ -226,7 +256,9 @@ def diff_against_db(conn: sqlite3.Connection, rows: list[dict]) -> dict:
     diff["deactivated"] = [
         rin
         for rin, current in stored.items()
-        if current["is_active"] and rin not in in_file
+        if current["is_active"]
+        and rin not in in_file
+        and not is_hfp(rin, current["rate_name"])
     ]
 
     result: dict = {key: sorted(diff[key]) for key in DIFF_KEYS}
@@ -235,7 +267,7 @@ def diff_against_db(conn: sqlite3.Connection, rows: list[dict]) -> dict:
 
 
 def apply_import(conn: sqlite3.Connection, rows: list[dict], diff: dict) -> None:
-    """Deactivate every RIN, then re-upsert the file; one transaction.
+    """Deactivate every non-HFP RIN, then re-upsert the file; one transaction.
 
     Why "deactivate everything, then upsert" instead of replaying the per-row
     diff: ``upsert_rin`` sets ``is_active`` unconditionally, so the rows in the
@@ -244,7 +276,8 @@ def apply_import(conn: sqlite3.Connection, rows: list[dict], diff: dict) -> None
     ``WHERE rin NOT IN (?, ?, ...)`` clause, which would blow past SQLite's
     bound-variable limit (999 by default) on a 1000+ RIN list. Deactivating
     instead of deleting keeps ``status`` history, and the following upsert also
-    restores RINs that an earlier import soft-deleted.
+    restores RINs that an earlier import soft-deleted. HFP RINs are skipped by
+    the ``UPDATE``, so they stay active even though they are never in the file.
 
     The whole import runs in an explicit transaction: any error (unknown
     provider, foreign-key violation, disk full) rolls back the deactivation
@@ -252,10 +285,21 @@ def apply_import(conn: sqlite3.Connection, rows: list[dict], diff: dict) -> None
     """
     conn.execute("BEGIN")
     try:
-        # 1. Deactivate everything that is currently active. The upsert below
-        #    will re-activate every RIN present in the file, so this is safe and
-        #    avoids a giant "NOT IN (...)" list.
-        conn.execute("UPDATE rins SET is_active = 0 WHERE is_active = 1")
+        # 1. Deactivate everything that is currently active, except HFP RINs:
+        #    they are not in the spreadsheet and must stay visible. The upsert
+        #    below will re-activate every RIN present in the file, so this is
+        #    safe and avoids a giant "NOT IN (...)" list.
+        #    ``COALESCE(rate_name, '')`` matters: a NULL rate_name would make
+        #    ``rate_name != 'HFP - RTP'`` evaluate to NULL and the RIN would
+        #    never be deactivated.
+        conn.execute(
+            "UPDATE rins SET is_active = 0"
+            " WHERE is_active = 1"
+            " AND COALESCE(rate_name, '') != ?"
+            " AND rin NOT LIKE 'USCA-PGPG-38%'"
+            " AND rin NOT LIKE 'USCA-PGXX-38%'",
+            (HFP_RATE_NAME,),
+        )
         # 2. Upsert every row from the file with is_active=1.
         for row in rows:
             upsert_rin(

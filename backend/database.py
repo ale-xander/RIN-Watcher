@@ -210,24 +210,28 @@ def parse_rin(rin: str) -> dict:
 
 
 def derive_category(tariff: str | None, enrollment_codes: list[str]) -> str:
-    """Derive the dashboard category from a tariff and its enrollment codes.
+    """Derive the dashboard *segment* from a tariff.
 
-    Checks run in a fixed order and the first match wins, so enrollment codes
-    beat the tariff:
+    The category is the segment only and never the program: NBT (Net Billing
+    Tariff) is an enrollment program, detected from the ``enrollment_codes``
+    column (any code starting with ``NBT-``), not a segment. Keeping NBT out of
+    this column is what lets one RIN belong to a segment (e.g. ``resid``) *and*
+    match the frontend's NBT filter at the same time.
 
-    1. ``nbt`` — any code starts with ``NBT-`` (e.g. ``NBT-2026``); an NBT
-       enrolment is NBT even when the tariff is agricultural (``AGB``).
-    2. ``ag`` — agricultural tariffs, ``AG`` plus anything (e.g. ``AGFA``).
-    3. ``non_res`` — commercial/industrial tariffs (e.g. ``B19``).
-    4. ``resid`` — residential time-of-use and EV tariffs (e.g. ``ETOUC``).
-    5. ``other`` — everything else, including blank tariffs. ``ETOUB``
+    Checks run in a fixed order and the first match wins:
+
+    1. ``ag`` — agricultural tariffs, ``AG`` plus anything (e.g. ``AGFA``).
+    2. ``non_res`` — commercial/industrial tariffs (e.g. ``B19``).
+    3. ``resid`` — residential time-of-use and EV tariffs (e.g. ``ETOUC``).
+    4. ``other`` — everything else, including blank tariffs. ``ETOUB``
        intentionally lands here because it is deprecated.
 
-    Tariff comparison is case-insensitive after stripping whitespace; the
-    ``NBT-`` check is case-sensitive. Pure function, no database access.
+    Tariff comparison is case-insensitive after stripping whitespace. The
+    ``enrollment_codes`` argument is accepted because the importer passes the
+    row's codes to every categorisation call, but it no longer influences the
+    result: program detection lives in the API/frontend. Pure function, no
+    database access.
     """
-    if any(code.startswith("NBT-") for code in enrollment_codes):
-        return "nbt"
     normalized = (tariff or "").strip().upper()
     if normalized.startswith("AG"):
         return "ag"

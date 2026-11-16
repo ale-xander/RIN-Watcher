@@ -12,7 +12,7 @@ export function ProviderTabs({
   return (
     <nav
       aria-label="Providers"
-      className="mb-4 flex gap-6 overflow-x-auto border-b border-gray-200"
+      className="mb-4 flex flex-wrap gap-x-6 gap-y-1 border-b border-gray-200"
     >
       {providers.map((provider) => {
         const isActive = provider.id === activeId;

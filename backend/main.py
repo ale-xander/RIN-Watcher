@@ -6,7 +6,9 @@ Run with:  uvicorn main:app --reload --port 8000
 GET /api/providers lists the provider tabs that have active RINs.
 GET /api/dashboard/{provider_code} returns one provider's status summary; pass
 ``?component=bundled``, ``?component=unbundled`` or ``?component=hfp`` to split
-PG&E's PGPG/PGXX RINs and its HFP (Hourly Flex Pricing) RINs.
+PG&E's PGPG/PGXX RINs and its HFP (Hourly Flex Pricing) RINs. ``?component=all``
+(or no component at all) returns the provider-wide snapshot and tags every RIN
+with its own ``component``.
 POST /api/admin/fetch queues a MIDAS fetch in the background; it is guarded by
 the FETCH_SECRET environment variable and returns 202 immediately.
 """
@@ -60,9 +62,15 @@ PROVIDER_LABELS = {
 PGE_PROVIDER_CODE = "pge"
 COMPONENT_PREFIXES = {"bundled": "PGPG", "unbundled": "PGXX"}
 HFP_COMPONENT = "hfp"
+ALL_COMPONENT = "all"
 HFP_RATE_NAME = "HFP - RTP"
+# HFP RINs are not in the spreadsheet, so ``rins.prefix`` is blank for them;
+# the 38xx series that carries HFP - RTP is the fallback.
+HFP_RIN_PREFIXES = ("USCA-PGPG-38", "USCA-PGXX-38")
 # Tab order advertised by /api/providers and accepted by /api/dashboard.
 PGE_COMPONENTS = (*COMPONENT_PREFIXES, HFP_COMPONENT)
+# ``all`` is accepted by /api/dashboard only (it is not a tab).
+DASHBOARD_COMPONENTS = (*PGE_COMPONENTS, ALL_COMPONENT)
 
 # One fetch at a time: concurrent runs would fight over the same SQLite file and
 # hammer the MIDAS API. Acquired by the endpoint, released by the worker.
@@ -163,6 +171,40 @@ def _parse_enrollment_codes(value: str | None) -> list[str]:
     return [str(code) for code in parsed]
 
 
+def _rin_prefix(row: Any) -> str:
+    """The RIN's prefix: the stored column, else its second dash segment.
+
+    RINs registered by ``fetch_data`` before the first spreadsheet import have
+    an empty ``prefix`` column, so the RIN itself is the fallback.
+    """
+    prefix = (row["prefix"] or "").strip().upper()
+    if prefix:
+        return prefix
+    parts = str(row["rin"]).split("-")
+    return parts[1].upper() if len(parts) > 1 else ""
+
+
+def _rin_component(row: Any) -> str | None:
+    """Derive a RIN's PG&E component from the RIN, not from the query param.
+
+    HFP has no prefix of its own, so it is matched by rate name first (the 38xx
+    series is a fallback). CCA-owned RINs (XXMB, XXSJ, XXPC, ...) return
+    ``None`` on purpose: ``unbundled`` names PG&E's PGXX delivery half, not a
+    CCA's generation half, so conflating the two would mislabel every CCA RIN
+    and break the delivery/generation pairing.
+    """
+    if row["rate_name"] == HFP_RATE_NAME or str(row["rin"]).startswith(
+        HFP_RIN_PREFIXES
+    ):
+        return HFP_COMPONENT
+    prefix = _rin_prefix(row)
+    if prefix == COMPONENT_PREFIXES["bundled"]:
+        return "bundled"
+    if prefix == COMPONENT_PREFIXES["unbundled"]:
+        return "unbundled"
+    return None
+
+
 def _rin_entry(row: Any) -> dict[str, Any]:
     """One dashboard row: identity, grouping fields and today's status."""
     return {
@@ -171,6 +213,7 @@ def _rin_entry(row: Any) -> dict[str, Any]:
         "tariff": row["tariff"],
         "enrollment_codes": _parse_enrollment_codes(row["enrollment_codes"]),
         "category": row["category"],
+        "component": _rin_component(row),
         "has_value_today": 1 if row["has_value_today"] == 1 else 0,
         "last_success_date": row["last_success_date"],
         # Kept for the current frontend; the display-formatted success date.
@@ -220,7 +263,8 @@ def get_dashboard(
         Query(
             description=(
                 "PG&E only: 'bundled' (PGPG), 'unbundled' (PGXX) or 'hfp'"
-                " (HFP - RTP). Ignored for CCAs."
+                " (HFP - RTP); 'all' returns the provider-wide snapshot."
+                " Ignored for CCAs."
             )
         ),
     ] = None,
@@ -229,17 +273,19 @@ def get_dashboard(
 
     ``?component=bundled`` keeps only PGPG RINs, ``?component=unbundled`` only
     PGXX RINs and ``?component=hfp`` only RINs whose rate name is
-    ``HFP - RTP`` (HFP has no prefix of its own). Without a component (or for a
-    CCA, which has no split) all of the provider's active RINs are returned.
+    ``HFP - RTP`` (HFP has no prefix of its own). ``?component=all``, or no
+    component at all, returns every active RIN of the provider -- for a CCA,
+    which has no split, a component is ignored either way. Every row carries
+    its own ``component``, derived from the RIN instead of the parameter.
     """
     code = provider_code.strip().lower()
     requested = (component or "").strip().lower() or None
-    if requested is not None and requested not in PGE_COMPONENTS:
+    if requested is not None and requested not in DASHBOARD_COMPONENTS:
         raise HTTPException(
             status_code=400,
             detail=(
                 f"Unknown component: {component}. "
-                f"Use one of: {', '.join(PGE_COMPONENTS)}."
+                f"Use one of: {', '.join(DASHBOARD_COMPONENTS)}."
             ),
         )
 
@@ -247,7 +293,7 @@ def get_dashboard(
     params: list[Any] = [code]
     # The component only narrows PG&E; CCAs own a single prefix each, so a
     # component sent for them is ignored instead of returning an empty tab.
-    if code == PGE_PROVIDER_CODE and requested is not None:
+    if code == PGE_PROVIDER_CODE and requested not in (None, ALL_COMPONENT):
         if requested == HFP_COMPONENT:
             # HFP RINs share the PGPG/PGXX prefixes but have no spreadsheet
             # row, so they are selected by rate name instead.
@@ -274,6 +320,7 @@ def get_dashboard(
                    r.tariff,
                    r.enrollment_codes,
                    r.category,
+                   r.prefix,
                    s.has_value_today,
                    s.last_success_date,
                    s.fetched_at

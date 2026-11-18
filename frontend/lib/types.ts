@@ -29,6 +29,12 @@ export type RinEntry = {
   tariff: string | null;
   enrollment_codes: string[];
   category: Segment;
+  /**
+   * PG&E component this RIN belongs to. `null` for CCA-owned RINs (MCE, SJCE,
+   * PCE): `unbundled` is a PG&E delivery-half concept (PGXX), not a CCA's
+   * generation half, so the two must not be conflated.
+   */
+  component: Component | null;
   has_value_today: 0 | 1;
   last_success_date: string | null;
   last_success: string | null;

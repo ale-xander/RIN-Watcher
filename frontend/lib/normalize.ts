@@ -36,6 +36,7 @@ export function normalizeRinEntry(raw: unknown): RinEntry | null {
         )
       : [],
     category: normalizeCategory(row.category),
+    component: isComponent(row.component) ? row.component : null,
     has_value_today:
       row.has_value_today === 1 || row.has_value_today === true ? 1 : 0,
     last_success_date:

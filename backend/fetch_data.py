@@ -1,15 +1,23 @@
 #!/usr/bin/env python3
-"""Fetch realtime MIDAS values for every PG&E RIN published by the MIDAS API.
+"""Fetch realtime MIDAS values for the PG&E RINs the importer registered.
 
-The RIN list itself now comes from the API: one ``GET /api/valuedata?SignalType=1``
+The RIN list itself comes from the API: one ``GET /api/valuedata?SignalType=1``
 request returns every rate plan MIDAS knows about under a ``Rates`` key. Only the
 entries whose ``RateID`` starts with ``USCA-PGPG`` or ``USCA-PGXX`` (PG&E) are
 kept, and test RINs (``RateID`` ending in ``-TEST``) are dropped: the ``-0000``
-variants carry the real values. Each remaining RIN is then queried for its latest
-values and the script records whether it published at least one non-null value
-for today (America/Los_Angeles) in the ``status`` table. Any test RIN already in
-the database is deleted on every run (real RINs that dropped out of the list are
-kept).
+variants carry the real values.
+
+The importer (``scripts/import_rins.py``) owns the RIN registry. This script
+never registers a RIN: it reads prices only for RINs the importer created and
+left active, and reports the rest as ``unknown`` (not in the database yet) or
+``inactive`` (soft-deleted by an import that dropped them). Without that guard a
+fetch would resurrect every RIN MIDAS still lists -- including HFP RINs that were
+removed from the HFP sheet -- and the active count would grow on every run.
+
+For each such RIN the script records whether it published at least one non-null
+value for today (America/Los_Angeles) in the ``status`` table. Any test RIN
+already in the database is deleted on every run (real RINs that dropped out of
+the list are kept).
 
 Usage:
     python fetch_data.py [--db /path/to/rin_watch.db]
@@ -240,8 +248,10 @@ def fetch_rin_list(session: requests.Session) -> list[tuple[str, str]]:
 
 
 def process(db_path: Path | None = None) -> int:
-    """Fetch the RIN list, then run the realtime fetch for every RIN.
+    """Fetch the RIN list, then read realtime values for the registered ones.
 
+    Only RINs that already exist in ``rins`` with ``is_active = 1`` are fetched;
+    unknown and inactive RINs are counted and skipped (see the module docstring).
     Returns a shell exit code.
     """
     session = requests.Session()
@@ -274,6 +284,8 @@ def process(db_path: Path | None = None) -> int:
 
     failures = 0
     with_value = 0
+    skipped_not_in_db: list[str] = []
+    skipped_inactive: list[str] = []
 
     with closing(get_connection(db_path)) as conn:
         removed = delete_test_rins(conn)
@@ -288,16 +300,26 @@ def process(db_path: Path | None = None) -> int:
         for index, (rin, rate_name) in enumerate(entries, start=1):
             prefix = f"[{index}/{total}] {rin}"
             try:
-                # Register the RIN up front so a failed fetch still shows up on
-                # the dashboard instead of silently disappearing from the list.
-                upsert_rin(conn, rin, PROVIDER_CODE, rate_name or None)
-                conn.commit()
+                # The importer owns the registry, so do not register anything
+                # here: an upsert would resurrect RINs an import deliberately
+                # deactivated and the active count would grow on every fetch.
+                existing = conn.execute(
+                    "SELECT is_active FROM rins WHERE rin = ?", (rin,)
+                ).fetchone()
+                if existing is None:
+                    skipped_not_in_db.append(rin)
+                    continue
+                if existing[0] == 0:
+                    skipped_inactive.append(rin)
+                    continue
 
                 payload = fetch_rate(session, rin)
                 has_value, dated, valued = evaluate_payload(payload, target_date)
                 api_rate_name = (
                     payload.get("RateName") if isinstance(payload, dict) else None
                 )
+                # Only reachable for existing + active rows, so the backfill can
+                # never reactivate a RIN the importer deactivated.
                 if not rate_name and api_rate_name:
                     upsert_rin(
                         conn, rin, PROVIDER_CODE, str(api_rate_name).strip() or None
@@ -336,8 +358,20 @@ def process(db_path: Path | None = None) -> int:
                 detail = f"no entries dated {target_date.isoformat()}"
             print(f"{prefix}: has_value_today={int(has_value)} ({detail})", flush=True)
 
+    attempted = total - len(skipped_not_in_db) - len(skipped_inactive)
+    if skipped_not_in_db or skipped_inactive:
+        print(
+            f"\nSkipped {len(skipped_not_in_db)} RIN(s) not in the database, "
+            f"{len(skipped_inactive)} deactivated by an import"
+        )
+        for label, rins in (
+            ("not in the database", skipped_not_in_db),
+            ("deactivated", skipped_inactive),
+        ):
+            if rins:
+                print(f"  {label} (first 5): {', '.join(rins[:5])}")
     print(
-        f"\nDone: {total - failures}/{total} RINs updated, "
+        f"Done: {attempted - failures}/{attempted} RINs updated, "
         f"{with_value} with a value today, {failures} error(s)."
     )
     return 0 if failures == 0 else 1

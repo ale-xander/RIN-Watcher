@@ -56,16 +56,20 @@ PROVIDER_LABELS = {
 # PG&E RINs are split across three tabs: PGPG is bundled (PG&E supplies both
 # delivery and generation), PGXX is unbundled (a CCA supplies the generation;
 # the RIN itself is still owned/fetched by PG&E) and HFP is the Hourly Flex
-# Pricing rate, which lives in MIDAS only (no RIN spreadsheet rows) and is
-# therefore identified by rate name instead of prefix. CCAs have no such split,
-# so ``?component=`` is ignored for them.
+# Pricing rate. HFP RINs come from ``HFP RINs.xlsx`` and carry a bucket-aware
+# rate name (``HFP - Bundled Secondary``, ``HFP - CCA Prices``, ...) instead of a
+# tariff, so the tab is selected by rate-name prefix. CCAs have no such split, so
+# ``?component=`` is ignored for them.
 PGE_PROVIDER_CODE = "pge"
 COMPONENT_PREFIXES = {"bundled": "PGPG", "unbundled": "PGXX"}
 HFP_COMPONENT = "hfp"
 ALL_COMPONENT = "all"
-HFP_RATE_NAME = "HFP - RTP"
-# HFP RINs are not in the spreadsheet, so ``rins.prefix`` is blank for them;
-# the 38xx series that carries HFP - RTP is the fallback.
+# Prefix shared by every HFP rate name; the per-bucket suffix depends on the
+# sheet column ("HFP - Bundled Primary", "HFP - CCA Prices", ...).
+HFP_RATE_PREFIX = "HFP - "
+# HFP RINs have no ``rins.prefix``, so the 38xx series that carries the HFP rate
+# names is the fallback for rows that predate the HFP import (rate name used to be
+# the single ``HFP - RTP``).
 HFP_RIN_PREFIXES = ("USCA-PGPG-38", "USCA-PGXX-38")
 # Tab order advertised by /api/providers and accepted by /api/dashboard.
 PGE_COMPONENTS = (*COMPONENT_PREFIXES, HFP_COMPONENT)
@@ -187,15 +191,17 @@ def _rin_prefix(row: Any) -> str:
 def _rin_component(row: Any) -> str | None:
     """Derive a RIN's PG&E component from the RIN, not from the query param.
 
-    HFP has no prefix of its own, so it is matched by rate name first (the 38xx
-    series is a fallback). CCA-owned RINs (XXMB, XXSJ, XXPC, ...) return
-    ``None`` on purpose: ``unbundled`` names PG&E's PGXX delivery half, not a
-    CCA's generation half, so conflating the two would mislabel every CCA RIN
+    HFP RINs are recognised by their rate name, which the HFP sheet writes as
+    ``HFP - <bucket>`` (this also covers the CCA buckets, whose RIN prefixes are
+    not in ``HFP_RIN_PREFIXES``). The 38xx series remains a fallback for rows
+    imported before the bucket-aware sheet. CCA-owned RINs (XXMB, XXSJ, XXPC, ...)
+    return ``None`` on purpose: ``unbundled`` names PG&E's PGXX delivery half, not
+    a CCA's generation half, so conflating the two would mislabel every CCA RIN
     and break the delivery/generation pairing.
     """
-    if row["rate_name"] == HFP_RATE_NAME or str(row["rin"]).startswith(
-        HFP_RIN_PREFIXES
-    ):
+    if (row["rate_name"] or "").startswith(HFP_RATE_PREFIX) or str(
+        row["rin"]
+    ).startswith(HFP_RIN_PREFIXES):
         return HFP_COMPONENT
     prefix = _rin_prefix(row)
     if prefix == COMPONENT_PREFIXES["bundled"]:
@@ -263,8 +269,8 @@ def get_dashboard(
         Query(
             description=(
                 "PG&E only: 'bundled' (PGPG), 'unbundled' (PGXX) or 'hfp'"
-                " (HFP - RTP); 'all' returns the provider-wide snapshot."
-                " Ignored for CCAs."
+                " (every 'HFP - <bucket>' rate name); 'all' returns the"
+                " provider-wide snapshot. Ignored for CCAs."
             )
         ),
     ] = None,
@@ -272,11 +278,12 @@ def get_dashboard(
     """Status summary for one provider, optionally one PG&E component.
 
     ``?component=bundled`` keeps only PGPG RINs, ``?component=unbundled`` only
-    PGXX RINs and ``?component=hfp`` only RINs whose rate name is
-    ``HFP - RTP`` (HFP has no prefix of its own). ``?component=all``, or no
-    component at all, returns every active RIN of the provider -- for a CCA,
-    which has no split, a component is ignored either way. Every row carries
-    its own ``component``, derived from the RIN instead of the parameter.
+    PGXX RINs and ``?component=hfp`` only RINs whose rate name starts with
+    ``HFP - `` (one bucket per HFP sheet column; HFP RINs have no prefix of their
+    own). ``?component=all``, or no component at all, returns every active RIN of
+    the provider -- for a CCA, which has no split, a component is ignored either
+    way. Every row carries its own ``component``, derived from the RIN instead of
+    the parameter.
     """
     code = provider_code.strip().lower()
     requested = (component or "").strip().lower() or None
@@ -295,10 +302,12 @@ def get_dashboard(
     # component sent for them is ignored instead of returning an empty tab.
     if code == PGE_PROVIDER_CODE and requested not in (None, ALL_COMPONENT):
         if requested == HFP_COMPONENT:
-            # HFP RINs share the PGPG/PGXX prefixes but have no spreadsheet
-            # row, so they are selected by rate name instead.
-            filters.append("r.rate_name = ?")
-            params.append(HFP_RATE_NAME)
+            # HFP RINs share the PGPG/PGXX prefixes but their ``prefix`` column
+            # is empty, so they are selected by rate-name prefix instead. LIKE
+            # with a trailing wildcard also matches rows imported before the
+            # bucket-aware sheet (rate name was ``HFP - RTP``).
+            filters.append("r.rate_name LIKE ?")
+            params.append(f"{HFP_RATE_PREFIX}%")
         else:
             filters.append("r.prefix = ?")
             params.append(COMPONENT_PREFIXES[requested])

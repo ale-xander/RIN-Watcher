@@ -223,8 +223,9 @@ def derive_category(tariff: str | None, enrollment_codes: list[str]) -> str:
     1. ``ag`` — agricultural tariffs, ``AG`` plus anything (e.g. ``AGFA``).
     2. ``non_res`` — commercial/industrial tariffs (e.g. ``B19``).
     3. ``resid`` — residential time-of-use and EV tariffs (e.g. ``ETOUC``).
-    4. ``other`` — everything else, including blank tariffs. ``ETOUB``
-       intentionally lands here because it is deprecated.
+       ``ETOUB`` is included even though PG&E has deprecated it: MCE still
+       carries four RINs on it and they are residential, not ``other``.
+    4. ``other`` — everything else, including blank tariffs.
 
     Tariff comparison is case-insensitive after stripping whitespace. The
     ``enrollment_codes`` argument is accepted because the importer passes the
@@ -237,7 +238,7 @@ def derive_category(tariff: str | None, enrollment_codes: list[str]) -> str:
         return "ag"
     if normalized in {"B1", "B6", "B10", "B19", "B20", "BEV1", "BEV2"}:
         return "non_res"
-    if normalized in {"ETOUC", "ETOUD", "EELEC", "EVB", "EV2A"}:
+    if normalized in {"ETOUB", "ETOUC", "ETOUD", "EELEC", "EVB", "EV2A"}:
         return "resid"
     return "other"
 

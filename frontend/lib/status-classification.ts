@@ -5,7 +5,7 @@
 //
 //   * "Pending launch"  - an NBT RIN for a vintage that has not started yet
 //                         (e.g. NBT-2027 while the current year is 2026).
-//                         Nothing is wrong; there is simply nothing to priced
+//                         Nothing is wrong; there is simply nothing to price
 //                         until the vintage launches.
 //   * "Not in MIDAS"    - a current/past vintage, no vintage at all, or a
 //                         floating vintage. That is a data-quality issue worth

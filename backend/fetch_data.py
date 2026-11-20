@@ -15,9 +15,9 @@ fetch would resurrect every RIN MIDAS still lists -- including HFP RINs that wer
 removed from the HFP sheet -- and the active count would grow on every run.
 
 For each such RIN the script records whether it published at least one non-null
-value for today (America/Los_Angeles) in the ``status`` table. Any test RIN
-already in the database is deleted on every run (real RINs that dropped out of
-the list are kept).
+value for today (America/Los_Angeles) in the ``status`` table. Test RINs
+(``-TEST``) already in the database are deleted on every run, with their
+``status`` rows; real RINs that dropped out of the list are kept.
 
 Usage:
     python fetch_data.py [--db /path/to/rin_watch.db]
@@ -51,7 +51,6 @@ from database import (
     get_db_path,
     init_db,
     save_status,
-    upsert_rin,
 )
 
 load_dotenv(BACKEND_DIR / ".env")
@@ -297,12 +296,15 @@ def process(db_path: Path | None = None) -> int:
                 flush=True,
             )
 
-        for index, (rin, rate_name) in enumerate(entries, start=1):
+        for index, (rin, _) in enumerate(entries, start=1):
             prefix = f"[{index}/{total}] {rin}"
             try:
-                # The importer owns the registry, so do not register anything
-                # here: an upsert would resurrect RINs an import deliberately
-                # deactivated and the active count would grow on every fetch.
+                # The importer owns the registry, so do not write the rins table
+                # here: a registration would resurrect RINs an import
+                # deliberately deactivated and the active count would grow on
+                # every fetch. MIDAS rate names are not stored either -- the HFP
+                # sheet owns the 'HFP - <bucket>' names, so a fetch must never
+                # rename a RIN. This loop only records status.
                 existing = conn.execute(
                     "SELECT is_active FROM rins WHERE rin = ?", (rin,)
                 ).fetchone()
@@ -315,15 +317,6 @@ def process(db_path: Path | None = None) -> int:
 
                 payload = fetch_rate(session, rin)
                 has_value, dated, valued = evaluate_payload(payload, target_date)
-                api_rate_name = (
-                    payload.get("RateName") if isinstance(payload, dict) else None
-                )
-                # Only reachable for existing + active rows, so the backfill can
-                # never reactivate a RIN the importer deactivated.
-                if not rate_name and api_rate_name:
-                    upsert_rin(
-                        conn, rin, PROVIDER_CODE, str(api_rate_name).strip() or None
-                    )
                 save_status(
                     conn,
                     rin,

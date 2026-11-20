@@ -8,13 +8,11 @@
 // RINs are excluded from the cell and reported as a muted sub-line instead:
 // folding them in would make a healthy PG&E strip look broken.
 
+import { CCA_HFP_RATE_NAME } from "@/lib/constants";
 import { buildHfpStrip } from "@/lib/health-matrix";
 import type { RinEntry } from "@/lib/types";
 
 import { MatrixCellView } from "./matrix-cell";
-
-/** The rate name CCA HFP RINs carry; not part of the PG&E HFP strip. */
-const CCA_HFP_RATE_NAME = "HFP - CCA Prices";
 
 export interface HfpStripProps {
   rins: RinEntry[];

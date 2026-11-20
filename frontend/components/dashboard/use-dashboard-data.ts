@@ -9,7 +9,7 @@ import {
 } from "@/lib/constants";
 import { normalizeDashboard, normalizeProviders } from "@/lib/normalize";
 import type {
-  Component,
+  ComponentQuery,
   Dashboard,
   DashboardState,
   Provider,
@@ -24,7 +24,7 @@ export type UseDashboardDataResult = {
   /** True when the active provider advertises a component split. */
   showComponentToggle: boolean;
   /** Component sent to the API, or null when the provider has no split. */
-  requestComponent: Component | null;
+  requestComponent: ComponentQuery | null;
   dashboardState: DashboardState;
   /** Payload for the selected provider/component, or null while stale. */
   data: Dashboard | null;
@@ -41,7 +41,9 @@ export type UseDashboardDataResult = {
  * The provider id lives in the hook because it is validated against the
  * provider list; the component stays in the caller and is passed in.
  */
-export function useDashboardData(component: Component): UseDashboardDataResult {
+export function useDashboardData(
+  component: ComponentQuery,
+): UseDashboardDataResult {
   const [providersState, setProvidersState] = useState<ProvidersState>({
     status: "loading",
   });
@@ -58,7 +60,7 @@ export function useDashboardData(component: Component): UseDashboardDataResult {
     providers.find((provider) => provider.id === providerId) ?? null;
   // Only PG&E advertises a component split in /api/providers.
   const showComponentToggle = (activeProvider?.components.length ?? 0) > 0;
-  const requestComponent: Component | null = showComponentToggle
+  const requestComponent: ComponentQuery | null = showComponentToggle
     ? component
     : null;
 

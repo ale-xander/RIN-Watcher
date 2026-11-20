@@ -99,7 +99,7 @@ export function normalizeProviders(payload: unknown): Provider[] {
 export function normalizeDashboard(
   payload: unknown,
   fallbackProvider: string,
-  fallbackComponent: Component | null,
+  fallbackComponent: string | null,
 ): Dashboard {
   const raw = (payload ?? {}) as Record<string, unknown>;
   const toEntries = (value: unknown): RinEntry[] =>

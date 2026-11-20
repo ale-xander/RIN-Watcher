@@ -1,50 +1,119 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import { AlertTriangle, Check } from "lucide-react";
+// The integrated RIN dashboard: provider tabs, the PG&E component toggle, the
+// segment x component health matrix (or, for HFP, the single summary strip that
+// replaces both matrices — HFP RINs carry no NBT codes), the NBT vintage matrix,
+// and the drill those matrices open.
+//
+// One rule keeps the page coherent: the matrices are always built from the
+// provider-wide payload (`?component=all`), because a matrix cell is meaningless
+// without its other columns. The component toggle therefore selects which
+// headline renders above the matrices, not what they aggregate. The category
+// chips are a scope on top of that payload: they narrow the matrices and, with
+// them, every drill opened from them.
+//
+// Clicking a cell opens the drill below the matrices: the filter pill
+// (breadcrumb + not-yet-live toggle), the pattern chips ("what do the failing
+// RINs have in common") and the affected-RINs table with its copy button. This
+// file owns the state; every counting rule lives in `lib/`.
+
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import {
   CATEGORY_LABELS,
   CATEGORY_ORDER,
   DEFAULT_COMPONENT,
-  DEFAULT_SORT,
   EMPTY_RINS,
-  SEGMENT_ORDER,
 } from "@/lib/constants";
-import { isNbt, sortEntries } from "@/lib/rin-utils";
-import type {
-  CategoryChip,
-  CategoryFilter,
-  Component,
-  RinGroup,
-  Segment,
-  Sort,
-  SortColumn,
-  ViewMode,
-} from "@/lib/types";
+import {
+  affectedRins as selectAffectedRins,
+  drillBaselineRins,
+  filterByAttributes,
+  sameDrill,
+  sortByStaleness,
+} from "@/lib/drill";
+import type { Drill, MainColKey, MainRowKey, NbtColKey } from "@/lib/drill";
+import { isNbt } from "@/lib/rin-utils";
+import type { CategoryChip, CategoryFilter, Component } from "@/lib/types";
 
+import { AffectedRinsTable } from "./affected-rins-table";
 import { CategoryChips } from "./category-chips";
 import { ComponentToggle } from "./component-toggle";
 import { DashboardSkeleton } from "./dashboard-skeleton";
 import { ErrorPanel } from "./error-panel";
+import { FilterPill } from "./filter-pill";
+import { HfpStrip } from "./hfp-strip";
+import { HealthMatrix } from "./health-matrix";
+import { NbtMatrix } from "./nbt-matrix";
+import { PatternStrip } from "./pattern-strip";
 import { ProviderTabs } from "./provider-tabs";
-import { RinTable } from "./rin-table";
-import { StatCard } from "./stat-card";
 import { useDashboardData } from "./use-dashboard-data";
+
+const ROW_LABELS: Record<MainRowKey, string> = {
+  ag: "AG",
+  non_res: "Non-Res",
+  resid: "Resid",
+  all: "All segments",
+};
+
+const COL_LABELS: Record<MainColKey, string> = {
+  bundled: "Bundled",
+  unbundled: "Unbundled",
+  all: "All components",
+};
+
+const NBT_COL_LABELS: Record<NbtColKey, string> = {
+  "2023": "2023",
+  "2024": "2024",
+  "2025": "2025",
+  "2026": "2026",
+  "2027": "2027",
+  floating: "Floating",
+  all: "All vintages",
+};
+
+/** Breadcrumb labels for a drill, before the status and filter segments. */
+function drillScopeLabels(drill: Drill): string[] {
+  switch (drill.kind) {
+    case "main":
+      return [COL_LABELS[drill.col], ROW_LABELS[drill.row]];
+    case "nbt": {
+      if (drill.row === "all") {
+        return ["All NBT", NBT_COL_LABELS[drill.col]];
+      }
+      // `<component>-<segment>`; neither part contains a dash.
+      const dash = drill.row.indexOf("-");
+      const component = drill.row.slice(0, dash) as MainColKey;
+      const segment = drill.row.slice(dash + 1) as MainRowKey;
+      return [
+        COL_LABELS[component],
+        ROW_LABELS[segment],
+        "NBT",
+        NBT_COL_LABELS[drill.col],
+      ];
+    }
+    case "hfp":
+      return ["HFP"];
+    case "provider":
+      return ["All RINs"];
+  }
+}
 
 export function Dashboard() {
   const [component, setComponent] = useState<Component>(DEFAULT_COMPONENT);
   const [category, setCategory] = useState<CategoryFilter>("all");
-  const [viewMode, setViewMode] = useState<ViewMode>("failed");
-  const [sort, setSort] = useState<Sort>(DEFAULT_SORT);
-  const [searchQuery, setSearchQuery] = useState("");
-  const [checkedRins, setCheckedRins] = useState<Set<string>>(
+  const [drill, setDrill] = useState<Drill | null>(null);
+  const [activeAttributes, setActiveAttributes] = useState<Set<string>>(
     () => new Set(),
   );
-  const [collapsedGroups, setCollapsedGroups] = useState<Set<Segment>>(
+  const [showNotYetLive, setShowNotYetLive] = useState(false);
+  const [selectedRins, setSelectedRins] = useState<Set<string>>(
     () => new Set(),
   );
+  const drillRef = useRef<HTMLElement>(null);
 
+  // The matrices need every component at once, so the request is always the
+  // provider-wide snapshot; `component` only picks the headline below.
   const {
     providersState,
     providers,
@@ -58,33 +127,44 @@ export function Dashboard() {
     dashboardLoading,
     reloadProviders,
     reloadDashboard,
-  } = useDashboardData(component);
+  } = useDashboardData("all");
 
-  // HFP is a single flat list: no category chips and no group headers.
   const isHfp = showComponentToggle && component === "hfp";
-  // Chips can't be clicked while HFP is selected, so any leftover selection is
-  // ignored instead of filtering the flat list down to nothing.
-  const activeCategory: CategoryFilter = isHfp ? "all" : category;
 
-  // A new provider/component means new RINs and new category counts.
+  // A new provider/component means new RINs: every drill, filter and check on
+  // the old ones is stale.
   useEffect(() => {
     setCategory("all");
-    setCheckedRins(new Set());
-    setCollapsedGroups(new Set());
+    setDrill(null);
+    setActiveAttributes(new Set());
+    setShowNotYetLive(false);
+    setSelectedRins(new Set());
   }, [providerId, requestComponent]);
 
-  // Switching between the failed/successful lists invalidates the selection.
+  // A new drill starts unfiltered and brings itself into view. Re-clicking the
+  // same cell keeps the same object, so it does not yank the page around.
   useEffect(() => {
-    setCheckedRins(new Set());
-  }, [viewMode]);
+    if (!drill) {
+      return;
+    }
+    setActiveAttributes(new Set());
+    setShowNotYetLive(false);
+    setSelectedRins(new Set());
+    drillRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, [drill]);
 
   const failedRins = data?.failed_rins ?? EMPTY_RINS;
   const successfulRins = data?.successful_rins ?? EMPTY_RINS;
 
-  // Chip counts ignore viewMode/search: they describe the provider/component
-  // payload that is already in memory (no refetch when a chip is clicked).
-  // ``nbt`` is counted from the enrollment codes, every other key from the
-  // segment stored on the row.
+  // Both matrices, the HFP strip and every drill read this one list, so a cell
+  // and the drill it opens can never disagree about which RINs it contains.
+  const allRins = useMemo(
+    () => [...failedRins, ...successfulRins],
+    [failedRins, successfulRins],
+  );
+
+  // Chip counts describe the payload in memory (no refetch on click); "nbt" is
+  // detected from the enrollment codes, the rest come from the stored segment.
   const categoryCounts = useMemo(() => {
     const counts: Record<CategoryFilter, number> = {
       all: 0,
@@ -94,14 +174,7 @@ export function Dashboard() {
       nbt: 0,
       other: 0,
     };
-    for (const entry of failedRins) {
-      counts.all += 1;
-      counts[entry.category] += 1;
-      if (isNbt(entry)) {
-        counts.nbt += 1;
-      }
-    }
-    for (const entry of successfulRins) {
+    for (const entry of allRins) {
       counts.all += 1;
       counts[entry.category] += 1;
       if (isNbt(entry)) {
@@ -109,109 +182,7 @@ export function Dashboard() {
       }
     }
     return counts;
-  }, [failedRins, successfulRins]);
-
-  const viewEntries = useMemo(
-    () => (viewMode === "failed" ? failedRins : successfulRins),
-    [viewMode, failedRins, successfulRins],
-  );
-
-  // Drop checks that no longer exist after a refresh so the copy button can
-  // never reference a RIN that disappeared from the payload.
-  useEffect(() => {
-    setCheckedRins((current) => {
-      if (current.size === 0) {
-        return current;
-      }
-      const available = new Set(viewEntries.map((entry) => entry.rin));
-      const next = new Set<string>();
-      let pruned = false;
-      for (const rin of current) {
-        if (available.has(rin)) {
-          next.add(rin);
-        } else {
-          pruned = true;
-        }
-      }
-      return pruned ? next : current;
-    });
-  }, [viewEntries]);
-
-  const visibleRows = useMemo(() => {
-    const query = searchQuery.trim().toLowerCase();
-    const filtered = viewEntries.filter((entry) => {
-      if (activeCategory === "nbt") {
-        // NBT is a program, detected from the enrollment codes. The table
-        // groups the result by segment rather than filtering it.
-        if (!isNbt(entry)) {
-          return false;
-        }
-      } else if (
-        activeCategory !== "all" &&
-        entry.category !== activeCategory
-      ) {
-        return false;
-      }
-      if (!query) {
-        return true;
-      }
-      return (
-        entry.rin.toLowerCase().includes(query) ||
-        (entry.tariff ?? "").toLowerCase().includes(query) ||
-        entry.enrollment_codes.some((code) =>
-          code.toLowerCase().includes(query),
-        )
-      );
-    });
-    return sortEntries(filtered, sort);
-  }, [viewEntries, activeCategory, searchQuery, sort]);
-
-  // HFP has no categories, so it is always a flat list. "All" (every segment)
-  // and NBT (every segment, NBT only) stay grouped; a single segment chip is a
-  // flat list.
-  const grouped =
-    !isHfp && (activeCategory === "all" || activeCategory === "nbt");
-
-  const groups = useMemo<RinGroup[]>(() => {
-    if (!grouped) {
-      return [];
-    }
-    return SEGMENT_ORDER.map((group) => ({
-      category: group,
-      label: CATEGORY_LABELS[group].group,
-      rows: visibleRows.filter((entry) => entry.category === group),
-    })).filter((group) => group.rows.length > 0);
-  }, [visibleRows, grouped]);
-
-  // Cards stay in sync with the chip selection without a network round trip.
-  const cardCounts = useMemo(() => {
-    if (!data) {
-      return { total: 0, withValue: 0, withoutValue: 0 };
-    }
-    if (activeCategory === "all") {
-      return {
-        total: data.total,
-        withValue: data.has_value_count,
-        withoutValue: data.no_value_count,
-      };
-    }
-    const inCategory = [...data.failed_rins, ...data.successful_rins].filter(
-      (entry) => {
-        if (activeCategory === "nbt") {
-          return isNbt(entry);
-        }
-        return entry.category === activeCategory;
-      },
-    );
-    const withValue = inCategory.filter(
-      (entry) => entry.has_value_today === 1,
-    ).length;
-    return {
-      total: inCategory.length,
-      withValue,
-      withoutValue: inCategory.length - withValue,
-    };
-  }, [data, activeCategory]);
+  }, [allRins]);
 
   const chips = useMemo<CategoryChip[]>(() => {
     const list: CategoryChip[] = [
@@ -224,97 +195,141 @@ export function Dashboard() {
     ];
     // Zero-count chips collapse, except the active one: keeping it visible
     // means the filter can always be switched back off.
-    return list.filter(
-      (chip) => chip.count > 0 || chip.id === activeCategory,
-    );
-  }, [categoryCounts, activeCategory]);
+    return list.filter((chip) => chip.count > 0 || chip.id === category);
+  }, [categoryCounts, category]);
 
+  // A refresh can remove the last RIN of the active segment; fall back to All
+  // rather than leaving the dashboard stuck on an empty scope.
   useEffect(() => {
     if (!data) {
       return;
     }
-    if (activeCategory !== "all" && categoryCounts[activeCategory] === 0) {
+    if (category !== "all" && categoryCounts[category] === 0) {
       setCategory("all");
+      setDrill(null);
     }
-  }, [data, activeCategory, categoryCounts]);
+  }, [data, category, categoryCounts]);
 
-  // Checked rows win; otherwise copy what is on screen, in sort order.
-  const copyRows = useMemo(
-    () =>
-      checkedRins.size > 0
-        ? viewEntries.filter((entry) => checkedRins.has(entry.rin))
-        : visibleRows,
-    [checkedRins, viewEntries, visibleRows],
+  const scopedRins = useMemo(() => {
+    if (category === "all") {
+      return allRins;
+    }
+    if (category === "nbt") {
+      return allRins.filter(isNbt);
+    }
+    return allRins.filter((entry) => entry.category === category);
+  }, [allRins, category]);
+
+  // Providers without a component split (the CCAs) have no matrix to click, so
+  // their dashboard opens straight into a provider-wide list.
+  const effectiveDrill = useMemo<Drill | null>(
+    () => (showComponentToggle ? drill : { kind: "provider" }),
+    [showComponentToggle, drill],
   );
 
-  function toggleRow(rin: string) {
-    setCheckedRins((current) => {
-      const next = new Set(current);
-      if (next.has(rin)) {
-        next.delete(rin);
-      } else {
-        next.add(rin);
-      }
-      return next;
-    });
-  }
+  const drillBaseline = useMemo(
+    () =>
+      effectiveDrill
+        ? drillBaselineRins(scopedRins, effectiveDrill)
+        : EMPTY_RINS,
+    [scopedRins, effectiveDrill],
+  );
+  const drillAffected = useMemo(
+    () => selectAffectedRins(drillBaseline, showNotYetLive),
+    [drillBaseline, showNotYetLive],
+  );
+  // Drives the empty state's "include N not-yet-live RINs" shortcut: with none
+  // in the baseline, turning the toggle on could not add a row.
+  const drillNotYetLiveCount = useMemo(
+    () =>
+      drillBaseline.filter((entry) => entry.status_kind === "not_in_midas")
+        .length,
+    [drillBaseline],
+  );
+  const affectedRows = useMemo(
+    () => sortByStaleness(filterByAttributes(drillAffected, activeAttributes)),
+    [drillAffected, activeAttributes],
+  );
 
-  function toggleAllVisible() {
-    const visible = visibleRows.map((entry) => entry.rin);
-    setCheckedRins((current) => {
-      const next = new Set(current);
-      const allChecked =
-        visible.length > 0 && visible.every((rin) => next.has(rin));
-      for (const rin of visible) {
-        if (allChecked) {
-          next.delete(rin);
-        } else {
+  // Drop checks that no longer exist so the copy button can never reference a
+  // RIN that left the drill (attribute chip, not-yet-live toggle, refresh).
+  useEffect(() => {
+    setSelectedRins((current) => {
+      if (current.size === 0) {
+        return current;
+      }
+      const available = new Set(affectedRows.map((entry) => entry.rin));
+      const next = new Set<string>();
+      let pruned = false;
+      for (const rin of current) {
+        if (available.has(rin)) {
           next.add(rin);
+        } else {
+          pruned = true;
         }
       }
-      return next;
+      return pruned ? next : current;
     });
-  }
+  }, [affectedRows]);
 
-  function toggleGroup(group: Segment) {
-    setCollapsedGroups((current) => {
-      const next = new Set(current);
-      if (next.has(group)) {
-        next.delete(group);
-      } else {
-        next.add(group);
-      }
-      return next;
-    });
-  }
+  const drillSegments = useMemo(() => {
+    if (!effectiveDrill) {
+      return [];
+    }
+    const segments = drillScopeLabels(effectiveDrill);
+    segments.push(showNotYetLive ? "Missing + not-yet-live" : "Missing");
+    if (category !== "all") {
+      segments.push(CATEGORY_LABELS[category].group);
+    }
+    segments.push(...activeAttributes);
+    return segments;
+  }, [effectiveDrill, showNotYetLive, category, activeAttributes]);
 
-  function handleSort(column: SortColumn) {
-    setSort((current) =>
-      current.column === column
-        ? {
-            column,
-            direction: current.direction === "asc" ? "desc" : "asc",
-          }
-        : { column, direction: "asc" },
+  function openDrill(next: Drill) {
+    // Same cell: keep the object so the scroll/reset effect stays quiet.
+    setDrill((current) =>
+      current !== null && sameDrill(current, next) ? current : next,
     );
   }
 
-  const successPercentage =
-    cardCounts.total > 0 ? (cardCounts.withValue / cardCounts.total) * 100 : 0;
+  function closeDrill() {
+    setDrill(null);
+    setActiveAttributes(new Set());
+    setShowNotYetLive(false);
+    setSelectedRins(new Set());
+  }
+
+  /** The pill's "clear all": drop the drill's filters, keep the drill open. */
+  function clearDrillFilters() {
+    setActiveAttributes(new Set());
+    setShowNotYetLive(false);
+    setSelectedRins(new Set());
+  }
+
+  function toggleAttribute(attribute: string) {
+    setActiveAttributes((current) => {
+      const next = new Set(current);
+      if (next.has(attribute)) {
+        next.delete(attribute);
+      } else {
+        next.add(attribute);
+      }
+      return next;
+    });
+  }
+
+  function handleComponentChange(next: Component) {
+    setComponent(next);
+    closeDrill();
+  }
+
+  function handleCategoryChange(next: CategoryFilter) {
+    setCategory(next);
+    closeDrill();
+  }
+
   const isLoading = providersLoading || dashboardLoading;
   const lastChecked = data?.last_checked ?? null;
-  const categoryLabel =
-    activeCategory === "all" ? null : CATEGORY_LABELS[activeCategory].group;
-  const emptyMessage =
-    searchQuery.trim().length > 0
-      ? "No RINs match your search."
-      : categoryLabel && categoryCounts[activeCategory] > 0
-        ? viewMode === "failed"
-          ? `No failed ${categoryLabel} RINs — all caught up 🎉`
-          : `No successful ${categoryLabel} RINs yet.`
-        : viewMode === "failed"
-          ? "No failed RINs — everything published 🎉"
-          : "No RIN has published a value today yet.";
 
   return (
     <main className="mx-auto max-w-6xl px-6 py-10" aria-busy={isLoading}>
@@ -364,15 +379,15 @@ export function Dashboard() {
           {showComponentToggle ? (
             <ComponentToggle
               component={component}
-              onChange={setComponent}
+              onChange={handleComponentChange}
             />
           ) : null}
 
-          {data && !isHfp ? (
+          {data ? (
             <CategoryChips
               chips={chips}
               active={category}
-              onChange={setCategory}
+              onChange={handleCategoryChange}
             />
           ) : null}
 
@@ -386,69 +401,78 @@ export function Dashboard() {
           ) : null}
 
           {data ? (
-            <>
-              <div className="grid grid-cols-1 gap-4 sm:grid-cols-3 sm:gap-6 mb-6">
-                <StatCard
-                  label="TOTAL RINS"
-                  value={cardCounts.total}
-                  valueClassName="text-5xl text-gray-900"
-                />
-                <StatCard
-                  label="HAS VALUE TODAY"
-                  value={cardCounts.withValue}
-                  valueClassName="text-5xl text-green-600"
-                  subtext={`${successPercentage.toFixed(1)}% published successfully`}
-                  icon={
-                    <Check
-                      className="w-5 h-5 text-green-600"
-                      strokeWidth={2.5}
-                      aria-hidden="true"
+            <div className="space-y-6">
+              {showComponentToggle ? (
+                isHfp ? (
+                  // HFP RINs carry no NBT codes (verified against the API), so
+                  // the vintage matrix would be an empty panel here: the strip
+                  // is the whole HFP headline.
+                  <HfpStrip
+                    rins={scopedRins}
+                    onCellClick={() => openDrill({ kind: "hfp" })}
+                  />
+                ) : (
+                  <>
+                    <HealthMatrix
+                      rins={scopedRins}
+                      selected={drill?.kind === "main" ? drill : null}
+                      onCellClick={(_cell, selection) =>
+                        openDrill({
+                          kind: "main",
+                          row: selection.row,
+                          col: selection.col,
+                        })
+                      }
                     />
-                  }
-                  active={viewMode === "successful"}
-                  activeRingClassName="ring-green-500"
-                  onClick={() => setViewMode("successful")}
-                />
-                <StatCard
-                  label="NO VALUE TODAY"
-                  value={cardCounts.withoutValue}
-                  valueClassName="text-5xl text-red-600"
-                  subtext="Requires utility follow-up"
-                  icon={
-                    <AlertTriangle
-                      className="w-5 h-5 text-red-600"
-                      strokeWidth={2.5}
-                      aria-hidden="true"
-                    />
-                  }
-                  active={viewMode === "failed"}
-                  activeRingClassName="ring-red-500"
-                  onClick={() => setViewMode("failed")}
-                />
-              </div>
 
-              <RinTable
-                viewMode={viewMode}
-                grouped={grouped}
-                rows={visibleRows}
-                groups={groups}
-                copyRows={copyRows}
-                sort={sort}
-                onSort={handleSort}
-                checkedRins={checkedRins}
-                onToggleRow={toggleRow}
-                onToggleAll={toggleAllVisible}
-                collapsedGroups={collapsedGroups}
-                onToggleGroup={toggleGroup}
-                searchQuery={searchQuery}
-                onSearchChange={setSearchQuery}
-                emptyMessage={emptyMessage}
-              />
-            </>
+                    <NbtMatrix
+                      rins={scopedRins}
+                      selected={drill?.kind === "nbt" ? drill : null}
+                      onCellClick={(_cell, selection) =>
+                        openDrill({
+                          kind: "nbt",
+                          row: selection.row,
+                          col: selection.col,
+                        })
+                      }
+                    />
+                  </>
+                )
+              ) : null}
+
+              {effectiveDrill ? (
+                <section
+                  ref={drillRef}
+                  aria-label="RIN drill"
+                  className="scroll-mt-6 space-y-4"
+                >
+                  <FilterPill
+                    segments={drillSegments}
+                    onBack={showComponentToggle ? closeDrill : undefined}
+                    onClear={clearDrillFilters}
+                    showNotYetLive={showNotYetLive}
+                    onToggleNotYetLive={setShowNotYetLive}
+                  />
+                  <PatternStrip
+                    affectedRins={drillAffected}
+                    baselineRins={drillBaseline}
+                    onAttributeClick={toggleAttribute}
+                    activeAttributes={activeAttributes}
+                  />
+                  <AffectedRinsTable
+                    rins={affectedRows}
+                    showNotYetLive={showNotYetLive}
+                    onShowNotYetLiveChange={setShowNotYetLive}
+                    notYetLiveCount={drillNotYetLiveCount}
+                    selectedRins={selectedRins}
+                    onSelectionChange={setSelectedRins}
+                  />
+                </section>
+              ) : null}
+            </div>
           ) : null}
         </>
       ) : null}
     </main>
   );
 }
-

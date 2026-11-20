@@ -3,7 +3,6 @@ import type {
   Component,
   RinEntry,
   Segment,
-  Sort,
 } from "@/lib/types";
 
 export const API_BASE_URL = (
@@ -15,7 +14,6 @@ export const DASHBOARD_URL = `${API_BASE_URL}/api/dashboard`;
 
 export const DEFAULT_PROVIDER_ID = "pge";
 export const DEFAULT_COMPONENT: Component = "bundled";
-export const DEFAULT_SORT: Sort = { column: "rin", direction: "asc" };
 
 /** PG&E component tabs, in the order the toggle renders them. */
 export const COMPONENT_OPTIONS: Component[] = ["bundled", "unbundled", "hfp"];
@@ -24,6 +22,13 @@ export const COMPONENT_LABELS: Record<Component, string> = {
   unbundled: "Unbundled",
   hfp: "HFP",
 };
+
+/**
+ * Rate name the CCA-owned HFP RINs carry. They are a separate feed from the
+ * PG&E HFP buckets, so the HFP strip reports them as a muted sub-line instead of
+ * folding them into the PG&E cell.
+ */
+export const CCA_HFP_RATE_NAME = "HFP - CCA Prices";
 
 /** Table segments, in group order. NBT is a program, never a segment. */
 export const SEGMENT_ORDER: Segment[] = ["ag", "non_res", "resid", "other"];

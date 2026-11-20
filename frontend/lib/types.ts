@@ -1,7 +1,12 @@
 /** PG&E component tab the dashboard can request. */
 export type Component = "bundled" | "unbundled" | "hfp";
 
-export type ViewMode = "failed" | "successful";
+/**
+ * What the dashboard asks the API for: one component, or the provider-wide
+ * snapshot (`all`). The matrices need every component at once, so that is what
+ * the dashboard requests.
+ */
+export type ComponentQuery = Component | "all";
 
 /** The tariff segment a RIN belongs to. */
 export type Segment = "ag" | "non_res" | "resid" | "other";
@@ -10,12 +15,6 @@ export type Segment = "ag" | "non_res" | "resid" | "other";
 export type Category = Segment | "nbt";
 
 export type CategoryFilter = "all" | Category;
-
-export type SortColumn = "rin" | "tariff" | "enrollment" | "last_success";
-
-export type SortDirection = "asc" | "desc";
-
-export type Sort = { column: SortColumn; direction: SortDirection };
 
 export type Provider = {
   id: string;
@@ -61,7 +60,5 @@ export type DashboardState =
   | { status: "loading" }
   | { status: "error"; message: string }
   | { status: "ready"; data: Dashboard };
-
-export type RinGroup = { category: Segment; label: string; rows: RinEntry[] };
 
 export type CategoryChip = { id: CategoryFilter; label: string; count: number };

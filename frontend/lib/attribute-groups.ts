@@ -225,7 +225,10 @@ function makeChip(
     baselineCount,
     affectedPct,
     baselinePct,
+    // No baseline means no defensible comparison: the ratio branch is built on
+    // the 0.01 floor and would flag nearly anything, so short-circuit to false.
     overrepresented:
+      baselineTotal > 0 &&
       affectedCount >= MIN_OVERREPRESENTED_COUNT &&
       (ratio > OVERREPRESENTED_RATIO || saturation > OVERREPRESENTED_SATURATION),
     saturation,
@@ -760,9 +763,9 @@ export function __devFixture(): {
   const empty = computePatterns([], fixtureBaselineRins(130));
   assertEqual("empty drill: group count", 0, empty.length);
 
-  // 6. Empty baseline: baselineCount/saturation stay 0, but the ratio branch
-  //    divides affectedPct by the 0.01 floor, so 3+ affected RINs still flag.
-  //    That is the literal rule from STEP 4, pinned here so a change is visible.
+  // 6. Empty baseline: baselineCount/saturation stay 0 and the baselineTotal
+  //    guard keeps the ratio branch out entirely, so a chip is never flagged
+  //    when there is no baseline to compare it against.
   const noBaseline = computePatterns(fixtureAffectedRins(), []);
   const noBaselineGroup = groupWithChips("no baseline drill", noBaseline[0], 3);
   const noBaselinePdp = chipNamed(noBaselineGroup, "PDP");
@@ -770,7 +773,7 @@ export function __devFixture(): {
   assertEqual("no baseline drill: PDP saturation", 0, noBaselinePdp.saturation);
   assertEqual(
     "no baseline drill: PDP flagged",
-    true,
+    false,
     noBaselinePdp.overrepresented,
   );
 

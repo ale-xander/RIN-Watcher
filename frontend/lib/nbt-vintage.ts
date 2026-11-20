@@ -2,14 +2,17 @@
 // NBT is a program marker ("NBT"); the vintage is carried by "NBT-YYYY".
 // "NBT-0000" and "NBT-9999" are placeholders mapped to "floating".
 
-export type Vintage =
+/** A resolved vintage: the fixed column set the NBT matrix renders. */
+export type NbtVintage =
   | "2023"
   | "2024"
   | "2025"
   | "2026"
   | "2027"
-  | "floating"
-  | null;
+  | "floating";
+
+/** ``getVintage`` result: an ``NbtVintage`` for NBT RINs, null otherwise. */
+export type Vintage = NbtVintage | null;
 
 const VINTAGE_RE = /^NBT-(\d{4})$/;
 

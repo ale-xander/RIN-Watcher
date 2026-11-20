@@ -7,7 +7,7 @@ import type { MatrixCell, NbtRowKey as NbtBodyRowKey } from "@/lib/health-matrix
 import type { NbtVintage } from "@/lib/nbt-vintage";
 import type { RinEntry } from "@/lib/types";
 
-import { MatrixCellView } from "./matrix-cell";
+import { MatrixCellView, MatrixHeadline } from "./matrix-cell";
 
 export type NbtRowKey = NbtBodyRowKey | "all";
 export type NbtColKey = NbtVintage | "all";
@@ -96,6 +96,7 @@ export function NbtMatrix({
         <h2 className="text-sm font-semibold text-gray-900">
           NBT Pricing Health by Vintage
         </h2>
+        <MatrixHeadline cell={matrix.grandTotal} />
       </div>
 
       <div className="overflow-x-auto">

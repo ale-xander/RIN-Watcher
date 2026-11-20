@@ -36,6 +36,7 @@ export type RinEntry = {
    */
   component: Component | null;
   has_value_today: 0 | 1;
+  status_kind: "healthy" | "missing" | "not_in_midas";
   last_success_date: string | null;
   last_success: string | null;
 };

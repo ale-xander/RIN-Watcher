@@ -1,9 +1,10 @@
 // Shared cell renderer for the two dashboard matrices (HealthMatrix, NbtMatrix).
 //
 // Purely presentational: every number arrives pre-computed on a `MatrixCell`,
-// so this file only maps (rag, missing/total, never) onto the v3 mockup style.
-// The big number is the cell's *missing* count — the action the matrix is about
-// — and the bar fills with that same missing share.
+// so this file only maps (rag, missing/total, never, notInMidas) onto the v3
+// mockup style. The big number is the cell's *missing* count — the action the
+// matrix is about — and the bar fills with that same missing share of the
+// actionable RINs, matching the RAG level beside it.
 
 import type { KeyboardEvent } from "react";
 
@@ -82,7 +83,10 @@ function renderEmpty() {
 
 function renderValue(cell: MatrixCell) {
   const level = cell.rag === "empty" ? "green" : cell.rag;
-  const missingShare = (cell.missing / cell.total) * 100;
+  // Same denominator as the RAG level: not-yet-live RINs are not failures.
+  const actionableTotal = cell.missing + cell.healthy;
+  const missingShare =
+    actionableTotal > 0 ? (cell.missing / actionableTotal) * 100 : 0;
 
   return (
     <>
@@ -115,6 +119,32 @@ function renderValue(cell: MatrixCell) {
           {cell.never} never priced
         </span>
       ) : null}
+
+      {cell.notInMidas > 0 ? (
+        <div className="text-[10px] text-gray-500 leading-tight">
+          {cell.notInMidas} not-yet-live
+        </div>
+      ) : null}
     </>
+  );
+}
+
+/**
+ * Card subtitle shared by both matrices: "N missing · M not-yet-live".
+ *
+ * The not-yet-live half only appears when there is something to report, so a
+ * fully live matrix keeps the single-figure headline.
+ */
+export function MatrixHeadline({ cell }: { cell: MatrixCell }) {
+  return (
+    <div className="text-[12px] text-gray-700">
+      <b className="text-red-600">{cell.missing}</b> missing
+      {cell.notInMidas > 0 ? (
+        <>
+          <span className="text-gray-400"> · </span>
+          <span className="text-gray-500">{cell.notInMidas} not-yet-live</span>
+        </>
+      ) : null}
+    </div>
   );
 }

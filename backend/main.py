@@ -211,6 +211,21 @@ def _rin_component(row: Any) -> str | None:
     return None
 
 
+def _status_kind(row: Any) -> str:
+    """Three-way classification for the health matrix.
+
+    'healthy'      -> status row exists, has_value_today = 1
+    'missing'      -> status row exists, has_value_today = 0
+    'not_in_midas' -> no status row (LEFT JOIN produced NULL)
+    """
+    raw = row["has_value_today"]
+    if raw is None:
+        return "not_in_midas"
+    if raw == 1:
+        return "healthy"
+    return "missing"
+
+
 def _rin_entry(row: Any) -> dict[str, Any]:
     """One dashboard row: identity, grouping fields and today's status."""
     return {
@@ -221,6 +236,7 @@ def _rin_entry(row: Any) -> dict[str, Any]:
         "category": row["category"],
         "component": _rin_component(row),
         "has_value_today": 1 if row["has_value_today"] == 1 else 0,
+        "status_kind": _status_kind(row),
         "last_success_date": row["last_success_date"],
         # Kept for the current frontend; the display-formatted success date.
         "last_success": _format_date(row["last_success_date"]),

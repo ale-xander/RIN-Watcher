@@ -9,6 +9,10 @@
 // builders reconcile their totals and throw on a mismatch: that is a dev-time
 // bug detector (a filtered-out or double-counted RIN), never an expected
 // runtime state.
+//
+// A cell's RAG level is judged against its ACTIVE RINs only (missing + healthy):
+// RINs MIDAS has no status row for yet ("not-yet-live") are counted and shown,
+// but they cannot fail a fetch they were never part of.
 
 import { getVintage } from "./nbt-vintage";
 import type { NbtVintage } from "./nbt-vintage";
@@ -17,13 +21,18 @@ import type { Component, RinEntry } from "./types";
 /** Traffic-light classification of a MatrixCell. */
 export type RagLevel = "green" | "amber" | "red" | "empty";
 
+/** The backend's three-way per-RIN status; see `_status_kind` in main.py. */
+export type StatusKind = "healthy" | "missing" | "not_in_midas";
+
 /** Status roll-up for one matrix cell. */
 export interface MatrixCell {
-  /** has_value_today === 0 */
+  /** status_kind === "missing" */
   missing: number;
-  /** has_value_today === 1 */
+  /** status_kind === "healthy" */
   healthy: number;
-  /** missing + healthy: every RIN that landed in this cell. */
+  /** status_kind === "not_in_midas": informational, never actionable. */
+  notInMidas: number;
+  /** missing + healthy + notInMidas: every RIN that landed in this cell. */
   total: number;
   /** Subset of `missing` with no last_success_date: never priced. */
   never: number;
@@ -94,6 +103,8 @@ export interface HfpStrip {
   total: number;
   missing: number;
   healthy: number;
+  /** HFP RINs MIDAS has no status row for: awaiting the feed, not failing. */
+  notInMidas: number;
   never: number;
   rag: RagLevel;
 }
@@ -104,26 +115,81 @@ export interface HfpStrip {
  */
 const RED_MISSING_RATIO = 0.1;
 
-/** Traffic light for a (missing, total) pair. `total` 0 is always `empty`. */
-export function ragLevelFor(missing: number, total: number): RagLevel {
-  if (total === 0) return "empty";
+/**
+ * Traffic light for a (missing, actionableTotal) pair. `actionableTotal` 0 is
+ * `empty`; the caller resolves the "only not-yet-live RINs" case to green.
+ */
+export function ragLevelFor(
+  missing: number,
+  actionableTotal: number,
+): RagLevel {
+  if (actionableTotal === 0) return "empty";
   if (missing === 0) return "green";
-  return missing / total >= RED_MISSING_RATIO ? "red" : "amber";
+  return missing / actionableTotal >= RED_MISSING_RATIO ? "red" : "amber";
 }
 
 /**
- * Roll a flat RIN array up into one cell. Anything that is not an explicit
- * `has_value_today === 1` counts as missing, so a null/undefined status (older
- * or partial payload) can never be mistaken for a healthy RIN.
+ * Resolve one RIN's three-way status. Payloads that predate `status_kind` fall
+ * back to `has_value_today`, so an unknown status is never read as healthy.
+ */
+function statusKindOf(rin: RinEntry): StatusKind {
+  const kind: StatusKind | undefined = rin.status_kind;
+  if (kind === "healthy" || kind === "missing" || kind === "not_in_midas") {
+    return kind;
+  }
+  return rin.has_value_today === 1 ? "healthy" : "missing";
+}
+
+/**
+ * Assemble a cell from its counts. RAG uses (missing / (missing + healthy)) —
+ * the ACTIONABLE denominator. `notInMidas` is informational: a RIN MIDAS has
+ * never heard of is a data gap, not a fetch failure, so it does not contribute
+ * to the failure %. A cell that is *only* not-yet-live is green: no action.
+ */
+function buildCell(counts: {
+  missing: number;
+  healthy: number;
+  notInMidas: number;
+  never: number;
+}): MatrixCell {
+  const { missing, healthy, notInMidas, never } = counts;
+  const actionableTotal = missing + healthy;
+  const rag =
+    actionableTotal === 0
+      ? notInMidas === 0
+        ? "empty"
+        : "green" // all not-yet-live: nothing is live yet, so nothing to fix
+      : ragLevelFor(missing, actionableTotal);
+
+  return {
+    missing,
+    healthy,
+    notInMidas,
+    total: actionableTotal + notInMidas,
+    never,
+    rag,
+  };
+}
+
+/**
+ * Roll a flat RIN array up into one cell. RINs that are not explicitly
+ * `healthy` count as `missing` (when their status is unknown), so a partial or
+ * pre-`status_kind` payload can never be mistaken for a healthy RIN.
  */
 export function cellFromRins(rins: RinEntry[]): MatrixCell {
   let missing = 0;
   let healthy = 0;
+  let notInMidas = 0;
   let never = 0;
 
   for (const rin of rins) {
-    if (rin.has_value_today === 1) {
+    const kind = statusKindOf(rin);
+    if (kind === "healthy") {
       healthy += 1;
+      continue;
+    }
+    if (kind === "not_in_midas") {
+      notInMidas += 1;
       continue;
     }
     missing += 1;
@@ -131,29 +197,41 @@ export function cellFromRins(rins: RinEntry[]): MatrixCell {
     if (!rin.last_success_date) never += 1;
   }
 
-  const total = missing + healthy;
-  return { missing, healthy, total, never, rag: ragLevelFor(missing, total) };
+  return buildCell({ missing, healthy, notInMidas, never });
 }
 
 /** Sum cells, re-deriving the ratio. Used for "all" columns and totals. */
 function mergeCells(cells: MatrixCell[]): MatrixCell {
   let missing = 0;
   let healthy = 0;
+  let notInMidas = 0;
   let never = 0;
 
   for (const cell of cells) {
     missing += cell.missing;
     healthy += cell.healthy;
+    notInMidas += cell.notInMidas;
     never += cell.never;
   }
 
-  const total = missing + healthy;
-  return { missing, healthy, total, never, rag: ragLevelFor(missing, total) };
+  return buildCell({ missing, healthy, notInMidas, never });
 }
 
 function assertEqual(label: string, expected: number, actual: number): void {
   if (expected !== actual) {
     throw new Error(`${label}: expected ${expected}, got ${actual}`);
+  }
+}
+
+/** Field-by-field comparison used by the dev fixture's hand-checked cells. */
+function assertCell(label: string, expected: MatrixCell, actual: MatrixCell): void {
+  assertEqual(`${label}: missing`, expected.missing, actual.missing);
+  assertEqual(`${label}: healthy`, expected.healthy, actual.healthy);
+  assertEqual(`${label}: notInMidas`, expected.notInMidas, actual.notInMidas);
+  assertEqual(`${label}: total`, expected.total, actual.total);
+  assertEqual(`${label}: never`, expected.never, actual.never);
+  if (expected.rag !== actual.rag) {
+    throw new Error(`${label}: rag expected ${expected.rag}, got ${actual.rag}`);
   }
 }
 
@@ -375,6 +453,7 @@ export function buildHfpStrip(rins: RinEntry[]): HfpStrip {
     total: cell.total,
     missing: cell.missing,
     healthy: cell.healthy,
+    notInMidas: cell.notInMidas,
     never: cell.never,
     rag: cell.rag,
   };
@@ -403,11 +482,15 @@ type FixtureRinInput = {
   category: RinEntry["category"];
   component: Component | null;
   healthy: boolean;
+  /** Overrides the status derived from `healthy`; used for not_in_midas RINs. */
+  statusKind?: StatusKind;
   lastSuccessDate: string | null;
   enrollmentCodes?: string[];
 };
 
 function fixtureRin(input: FixtureRinInput): RinEntry {
+  const statusKind: StatusKind =
+    input.statusKind ?? (input.healthy ? "healthy" : "missing");
   return {
     rin: input.rin,
     rate_name: null,
@@ -415,7 +498,8 @@ function fixtureRin(input: FixtureRinInput): RinEntry {
     enrollment_codes: input.enrollmentCodes ?? [],
     category: input.category,
     component: input.component,
-    has_value_today: input.healthy ? 1 : 0,
+    has_value_today: statusKind === "healthy" ? 1 : 0,
+    status_kind: statusKind,
     last_success_date: input.lastSuccessDate,
     last_success: null,
   };
@@ -454,6 +538,43 @@ function fixtureCell(input: FixtureCellInput): RinEntry[] {
       lastSuccessDate,
     });
   });
+}
+
+type FixtureStatusCellInput = {
+  tag: string;
+  category: MatrixSegment;
+  component: MatrixComponent;
+  healthy?: number;
+  missing?: number;
+  notInMidas?: number;
+};
+
+/** Explicit status counts, including not_in_midas RINs (no status row at all). */
+function fixtureStatusCell(input: FixtureStatusCellInput): RinEntry[] {
+  const healthy = input.healthy ?? 0;
+  const missing = input.missing ?? 0;
+  const notInMidas = input.notInMidas ?? 0;
+  const statuses: StatusKind[] = [
+    ...Array.from({ length: healthy }, (): StatusKind => "healthy"),
+    ...Array.from({ length: missing }, (): StatusKind => "missing"),
+    ...Array.from({ length: notInMidas }, (): StatusKind => "not_in_midas"),
+  ];
+
+  return statuses.map((statusKind, index) =>
+    fixtureRin({
+      rin: `USCA-${RIN_PREFIX[input.component]}-${input.tag}-${String(
+        index + 1,
+      ).padStart(3, "0")}`,
+      category: input.category,
+      component: input.component,
+      healthy: statusKind === "healthy",
+      statusKind,
+      // A not_in_midas RIN has no status row, hence no success date either.
+      // A `missing` one is a known RIN that priced before today.
+      lastSuccessDate:
+        statusKind === "not_in_midas" ? null : "2026-11-18",
+    }),
+  );
 }
 
 function fixtureNbtRin(
@@ -627,20 +748,72 @@ function fixtureHfpRins(): RinEntry[] {
   ];
 }
 
+/*
+ * Two standalone cells pinning the not_in_midas rules (m = missing, h = healthy,
+ * nym = not_in_midas, t = total):
+ *
+ *   all-notInMidas  m0 h0 nym5 t5 n0 green  (nothing actionable -> green)
+ *   mixed           m2 h3 nym4 t9 n2 red    (2/5 = 40% of actionable -> red)
+ *
+ * The mixed cell's `never` is 0: both missing RINs returned a price before. Its
+ * total is 9 because not-in-MIDAS RINs still occupy a row in the matrix, but
+ * only 5 of them can fail, which is the denominator RAG uses.
+ */
+function fixtureAllNotInMidasRins(): RinEntry[] {
+  return fixtureStatusCell({
+    tag: "NIM",
+    category: "ag",
+    component: "bundled",
+    notInMidas: 5,
+  });
+}
+
+function fixtureMixedStatusRins(): RinEntry[] {
+  return fixtureStatusCell({
+    tag: "MIX",
+    category: "non_res",
+    component: "bundled",
+    healthy: 3,
+    missing: 2,
+    notInMidas: 4,
+  });
+}
+
 /**
  * Smoke-test fixture: runs the builders over the three synthetic payloads below.
  * Each payload documents the cells it must produce, so a dev can eyeball the
  * output of `console.table(__devFixture().main.rows)` without a live API.
+ *
+ * The two not_in_midas cells are asserted here because they are not part of a
+ * matrix: they pin `cellFromRins`'s actionable-denominator rule directly.
  */
 export function __devFixture(): {
   main: MainMatrix;
   nbt: NbtMatrix;
   hfp: HfpStrip;
+  allNotInMidas: MatrixCell;
+  mixed: MatrixCell;
 } {
+  const allNotInMidas = cellFromRins(fixtureAllNotInMidasRins());
+  assertCell(
+    "fixture all-notInMidas",
+    { missing: 0, healthy: 0, notInMidas: 5, total: 5, never: 0, rag: "green" },
+    allNotInMidas,
+  );
+
+  const mixed = cellFromRins(fixtureMixedStatusRins());
+  assertCell(
+    "fixture mixed",
+    { missing: 2, healthy: 3, notInMidas: 4, total: 9, never: 0, rag: "red" },
+    mixed,
+  );
+
   return {
     main: buildMainMatrix(fixtureMainRins()),
     nbt: buildNbtMatrix(fixtureNbtRins()),
     hfp: buildHfpStrip(fixtureHfpRins()),
+    allNotInMidas,
+    mixed,
   };
 }
 

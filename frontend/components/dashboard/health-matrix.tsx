@@ -6,7 +6,7 @@ import { buildMainMatrix } from "@/lib/health-matrix";
 import type { MatrixCell } from "@/lib/health-matrix";
 import type { RinEntry } from "@/lib/types";
 
-import { MatrixCellView } from "./matrix-cell";
+import { MatrixCellView, MatrixHeadline } from "./matrix-cell";
 
 export type MainRowKey = "ag" | "non_res" | "resid" | "all";
 export type MainColKey = "bundled" | "unbundled" | "all";
@@ -80,6 +80,8 @@ export function HealthMatrix({
         <h2 className="text-sm font-semibold text-gray-900">
           Pricing Health by Segment
         </h2>
+        {/* PG&E bundled + unbundled only; HFP has its own strip. */}
+        <MatrixHeadline cell={matrix.grandTotal} />
       </div>
 
       <div className="overflow-x-auto">

@@ -383,6 +383,7 @@ function fixtureRin(
     category: "other",
     component,
     has_value_today: 0,
+    status_kind: "missing",
     last_success_date: null,
     last_success: null,
   };

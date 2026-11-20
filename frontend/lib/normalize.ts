@@ -39,6 +39,7 @@ export function normalizeRinEntry(raw: unknown): RinEntry | null {
     component: isComponent(row.component) ? row.component : null,
     has_value_today:
       row.has_value_today === 1 || row.has_value_today === true ? 1 : 0,
+    status_kind: normalizeStatusKind(row.status_kind),
     last_success_date:
       typeof row.last_success_date === "string" ? row.last_success_date : null,
     last_success:
@@ -49,6 +50,15 @@ export function normalizeRinEntry(raw: unknown): RinEntry | null {
 /** Narrow an API value to a component tab the dashboard can request. */
 function isComponent(value: unknown): value is Component {
   return value === "bundled" || value === "unbundled" || value === "hfp";
+}
+
+/** Narrow the backend's three-way status; anything unrecognised is `missing`. */
+function normalizeStatusKind(
+  value: unknown,
+): "healthy" | "missing" | "not_in_midas" {
+  return value === "healthy" || value === "missing" || value === "not_in_midas"
+    ? value
+    : "missing"; // defensive default; unknown payload -> treat as missing
 }
 
 /**

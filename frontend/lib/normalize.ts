@@ -52,13 +52,17 @@ function isComponent(value: unknown): value is Component {
   return value === "bundled" || value === "unbundled" || value === "hfp";
 }
 
-/** Narrow the backend's three-way status; anything unrecognised is `missing`. */
+/**
+ * Narrow the backend's three-way status; anything unrecognised stays
+ * `undefined` so callers can fall back to `has_value_today` instead of being
+ * forced onto one branch (see `statusKindOf` in health-matrix.ts).
+ */
 function normalizeStatusKind(
   value: unknown,
-): "healthy" | "missing" | "not_in_midas" {
+): "healthy" | "missing" | "not_in_midas" | undefined {
   return value === "healthy" || value === "missing" || value === "not_in_midas"
     ? value
-    : "missing"; // defensive default; unknown payload -> treat as missing
+    : undefined;
 }
 
 /**

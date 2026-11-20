@@ -779,6 +779,27 @@ function fixtureMixedStatusRins(): RinEntry[] {
   });
 }
 
+/*
+ * Legacy payload: no `status_kind` column at all, only `has_value_today`. Pins
+ * the fallback in `statusKindOf` -- the priced RIN must read as healthy, the
+ * unpriced one as missing (1 missing of 2 actionable = 50% -> red).
+ */
+function fixtureLegacyStatusRins(): RinEntry[] {
+  const base = {
+    rate_name: null,
+    tariff: null,
+    enrollment_codes: [],
+    category: "ag" as const,
+    component: "bundled" as const,
+    last_success_date: null,
+    last_success: null,
+  };
+  return [
+    { ...base, rin: "USCA-PGPG-LEGACY-001", has_value_today: 1 },
+    { ...base, rin: "USCA-PGPG-LEGACY-002", has_value_today: 0 },
+  ];
+}
+
 /**
  * Smoke-test fixture: runs the builders over the three synthetic payloads below.
  * Each payload documents the cells it must produce, so a dev can eyeball the
@@ -793,6 +814,7 @@ export function __devFixture(): {
   hfp: HfpStrip;
   allNotInMidas: MatrixCell;
   mixed: MatrixCell;
+  legacy: MatrixCell;
 } {
   const allNotInMidas = cellFromRins(fixtureAllNotInMidasRins());
   assertCell(
@@ -808,12 +830,21 @@ export function __devFixture(): {
     mixed,
   );
 
+  // No status_kind: has_value_today=1 must classify as healthy, not missing.
+  const legacy = cellFromRins(fixtureLegacyStatusRins());
+  assertCell(
+    "fixture legacy payload (no status_kind)",
+    { missing: 1, healthy: 1, notInMidas: 0, total: 2, never: 1, rag: "red" },
+    legacy,
+  );
+
   return {
     main: buildMainMatrix(fixtureMainRins()),
     nbt: buildNbtMatrix(fixtureNbtRins()),
     hfp: buildHfpStrip(fixtureHfpRins()),
     allNotInMidas,
     mixed,
+    legacy,
   };
 }
 

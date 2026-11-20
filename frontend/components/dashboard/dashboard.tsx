@@ -52,7 +52,7 @@ import { useDashboardData } from "./use-dashboard-data";
 const ROW_LABELS: Record<MainRowKey, string> = {
   ag: "AG",
   non_res: "Non-Res",
-  resid: "Resid",
+  resid: "Residential",
   all: "All segments",
 };
 

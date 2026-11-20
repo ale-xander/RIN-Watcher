@@ -14,6 +14,8 @@ import type { ClassifiedAttributes } from "@/lib/attribute-groups";
 import { COMPONENT_LABELS } from "@/lib/constants";
 import { getVintage } from "@/lib/nbt-vintage";
 import type { NbtVintage } from "@/lib/nbt-vintage";
+import { classifyDisplayStatus } from "@/lib/status-classification";
+import type { RinDisplayStatus } from "@/lib/status-classification";
 import type { RinEntry } from "@/lib/types";
 
 import { CopyButton } from "./copy-button";
@@ -24,6 +26,7 @@ const HEADER_CLASS =
 type ColumnKey =
   | "rin"
   | "component"
+  | "status"
   | "tariff"
   | "vintage"
   | "voltage"
@@ -43,6 +46,7 @@ interface Row {
   rin: RinEntry;
   attributes: ClassifiedAttributes;
   vintage: NbtVintage | null;
+  status: RinDisplayStatus;
 }
 
 export interface AffectedRinsTableProps {
@@ -76,14 +80,35 @@ export function AffectedRinsTable({
         rin,
         attributes: classifyAttributes(rin.enrollment_codes),
         vintage: getVintage(rin.enrollment_codes),
+        status: classifyDisplayStatus(rin),
       })),
     [rins],
   );
+
+  // Counts for the summary strip: it disambiguates the matrix's coarse
+  // notInMidas count once the not-yet-live toggle brings those RINs in.
+  const statusCounts = useMemo(() => {
+    const counts = { noPrice: 0, notInMidas: 0, pendingLaunch: 0 };
+    for (const row of rows) {
+      if (row.status === "no_price") {
+        counts.noPrice += 1;
+      } else if (row.status === "not_in_midas") {
+        counts.notInMidas += 1;
+      } else if (row.status === "pending_launch") {
+        counts.pendingLaunch += 1;
+      }
+    }
+    return counts;
+  }, [rows]);
+
+  const showSummaryStrip =
+    statusCounts.notInMidas + statusCounts.pendingLaunch > 0;
 
   const columns = useMemo<Column[]>(() => {
     const list: Column[] = [
       { key: "rin", label: "RIN" },
       { key: "component", label: "Component" },
+      { key: "status", label: "Status" },
       { key: "tariff", label: "Tariff" },
     ];
     if (rows.some((row) => row.vintage !== null)) {
@@ -155,6 +180,25 @@ export function AffectedRinsTable({
           </span>
         ) : null}
       </div>
+
+      {showSummaryStrip ? (
+        <div className="flex gap-3 border-b border-gray-100 bg-gray-50/50 px-5 py-3 text-xs text-gray-500">
+          <span>{rows.length} shown</span>
+          {statusCounts.noPrice > 0 ? (
+            <span>· {statusCounts.noPrice} no price</span>
+          ) : null}
+          {statusCounts.notInMidas > 0 ? (
+            <span className="font-medium text-amber-700">
+              · {statusCounts.notInMidas} not in MIDAS
+            </span>
+          ) : null}
+          {statusCounts.pendingLaunch > 0 ? (
+            <span className="text-gray-400">
+              · {statusCounts.pendingLaunch} pending launch
+            </span>
+          ) : null}
+        </div>
+      ) : null}
 
       {rows.length === 0 ? (
         <div className="px-6 py-10 text-center text-sm text-gray-500">
@@ -235,7 +279,7 @@ export function AffectedRinsTable({
 }
 
 function Cell({ column, row }: { column: ColumnKey; row: Row }) {
-  const { rin, attributes, vintage } = row;
+  const { rin, attributes, vintage, status } = row;
 
   switch (column) {
     case "rin":
@@ -250,6 +294,8 @@ function Cell({ column, row }: { column: ColumnKey; row: Row }) {
           {rin.component === null ? "—" : COMPONENT_LABELS[rin.component]}
         </td>
       );
+    case "status":
+      return <StatusCell status={status} />;
     case "tariff":
       return (
         <td className="whitespace-nowrap px-3 py-2 text-sm text-gray-700">
@@ -325,5 +371,40 @@ function Cell({ column, row }: { column: ColumnKey; row: Row }) {
         </td>
       );
     }
+  }
+}
+
+/**
+ * The Status column: the same four-way classification the summary strip counts,
+ * so a row and the strip can never disagree.
+ */
+function StatusCell({ status }: { status: RinDisplayStatus }) {
+  switch (status) {
+    case "no_price":
+      return (
+        <td className="whitespace-nowrap px-3 py-2 text-xs text-gray-600">
+          No price
+        </td>
+      );
+    case "not_in_midas":
+      return (
+        <td className="whitespace-nowrap px-3 py-2 text-xs font-medium text-amber-700">
+          Not in MIDAS
+        </td>
+      );
+    case "pending_launch":
+      return (
+        <td className="whitespace-nowrap px-3 py-2 text-xs text-gray-400">
+          Pending launch
+        </td>
+      );
+    case "healthy":
+      return (
+        <td className="whitespace-nowrap px-3 py-2 text-xs">
+          <span className="text-green-600" title="Healthy" aria-label="Healthy">
+            ✓
+          </span>
+        </td>
+      );
   }
 }

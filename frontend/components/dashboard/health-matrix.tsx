@@ -20,7 +20,7 @@ export interface MainMatrixSelection {
 const SEGMENT_ROWS: { key: Exclude<MainRowKey, "all">; label: string }[] = [
   { key: "ag", label: "AG" },
   { key: "non_res", label: "Non-Res" },
-  { key: "resid", label: "Resid" },
+  { key: "resid", label: "Residential" },
 ];
 
 const COLUMNS: { key: MainColKey; label: string }[] = [

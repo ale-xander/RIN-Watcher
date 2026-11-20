@@ -21,10 +21,10 @@ export interface NbtMatrixSelection {
 const BODY_ROWS: { key: NbtBodyRowKey; label: string }[] = [
   { key: "bundled-ag", label: "Bundled · AG" },
   { key: "bundled-non_res", label: "Bundled · Non-Res" },
-  { key: "bundled-resid", label: "Bundled · Resid" },
+  { key: "bundled-resid", label: "Bundled · Residential" },
   { key: "unbundled-ag", label: "Unbundled · AG" },
   { key: "unbundled-non_res", label: "Unbundled · Non-Res" },
-  { key: "unbundled-resid", label: "Unbundled · Resid" },
+  { key: "unbundled-resid", label: "Unbundled · Residential" },
 ];
 
 /** Display label per vintage: the placeholder column reads as "Floating". */

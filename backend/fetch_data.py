@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Fetch realtime MIDAS values for the PG&E RINs the importer registered.
+"""Fetch realtime MIDAS values for the RINs the importer registered.
 
 The RIN list itself comes from the API: one ``GET /api/valuedata?SignalType=1``
 request returns every rate plan MIDAS knows about under a ``Rates`` key. Only the
-entries whose ``RateID`` starts with ``USCA-PGPG`` or ``USCA-PGXX`` (PG&E) are
-kept, and test RINs (``RateID`` ending in ``-TEST``) are dropped: the ``-0000``
-variants carry the real values.
+entries whose ``RateID`` starts with a watched prefix are kept — PG&E's
+``USCA-PGPG`` / ``USCA-PGXX`` plus the CCA-owned generation halves
+(``USCA-XXMB``, ``USCA-XXSJ``, ``USCA-XXPC``, ...). Test RINs (``RateID`` ending
+in ``-TEST``) are dropped: the ``-0000`` variants carry the real values.
 
 The importer (``scripts/import_rins.py``) owns the RIN registry. This script
 never registers a RIN: it reads prices only for RINs the importer created and
@@ -56,10 +57,25 @@ from database import (
 load_dotenv(BACKEND_DIR / ".env")
 
 API_URL = "https://midasapi.energy.ca.gov/api/valuedata"
-PROVIDER_CODE = "pge"  # hardcoded for now
 PACIFIC = pytz.timezone("America/Los_Angeles")
 RIN_LIST_SIGNAL_TYPE = 1  # SignalType value that returns the full RIN list
-RIN_ID_PREFIXES = ("USCA-PGPG", "USCA-PGXX")  # PG&E rate plan IDs
+# Rate plans this fetcher reads. PGPG/PGXX are PG&E-owned (bundled delivery +
+# generation / unbundled delivery); the XX* prefixes are the CCA-owned generation
+# halves (XXMB = MCE, XXSJ = SJCE, XXPC = PCE, ...). MIDAS lists all of them
+# under SignalType=1, so one list request covers every provider we track.
+RIN_ID_PREFIXES = (
+    "USCA-PGPG",
+    "USCA-PGXX",
+    "USCA-XXMB",
+    "USCA-XXSJ",
+    "USCA-XXPC",
+    "USCA-XXPR",
+    "USCA-XXVC",
+    "USCA-XXEB",
+    "USCA-XXSV",
+    "USCA-XXCA",
+    "USCA-XXMC",
+)
 RIN_TEST_SUFFIX = "-TEST"  # e.g. USCA-PGXX-4004-TEST; only -0000 variants are real
 REQUEST_TIMEOUT = 30  # seconds
 RIN_LIST_TIMEOUT = 120  # seconds; the full RIN list is roughly 14 MB
@@ -192,11 +208,11 @@ def entry_rate_name(entry: dict[str, Any]) -> str:
 def rin_entries(payload: Any) -> list[tuple[str, str]]:
     """Extract (rin, rate_name) pairs from the RIN list payload.
 
-    MIDAS wraps the list in a ``Rates`` key. Only PG&E rate plans (``RateID``
-    starting with USCA-PGPG / USCA-PGXX) are kept, and test RINs (``RateID``
-    ending in ``-TEST``) are ignored — the ``-0000`` variants hold the real
-    values, so ``USCA-PGXX-4004-TEST`` is dropped while ``USCA-PGXX-4004-0000``
-    is kept.
+    MIDAS wraps the list in a ``Rates`` key. Only the watched prefixes (PG&E's
+    ``USCA-PGPG`` / ``USCA-PGXX`` and the CCA-owned ``USCA-XX*`` plans) are
+    kept, and test RINs (``RateID`` ending in ``-TEST``) are ignored — the
+    ``-0000`` variants hold the real values, so ``USCA-PGXX-4004-TEST`` is
+    dropped while ``USCA-PGXX-4004-0000`` is kept.
     """
     if not isinstance(payload, dict):
         raise TypeError("unexpected RIN list payload (expected a JSON object)")
@@ -228,15 +244,15 @@ def rin_entries(payload: Any) -> list[tuple[str, str]]:
         rows.append((rin, entry_rate_name(entry)))
 
     print(
-        f"RIN list: kept {len(rows)}, skipped {skipped_prefix} non-PG&E, "
-        f"{skipped_test} test, {duplicates} duplicate",
+        f"RIN list: kept {len(rows)}, skipped {skipped_prefix} outside the "
+        f"watched prefixes, {skipped_test} test, {duplicates} duplicate",
         flush=True,
     )
     return rows
 
 
 def fetch_rin_list(session: requests.Session) -> list[tuple[str, str]]:
-    """GET every RIN MIDAS knows about and keep the PG&E rate plans."""
+    """GET every RIN MIDAS knows about and keep the watched rate plans."""
     payload = _get_json(
         session,
         {"SignalType": RIN_LIST_SIGNAL_TYPE},
@@ -269,13 +285,13 @@ def process(db_path: Path | None = None) -> int:
 
     total = len(entries)
     if total == 0:
-        print("No RINs matched the PG&E prefixes - nothing to do.")
+        print("No RINs matched the watched prefixes - nothing to do.")
         return 0
 
     db_file = init_db(db_path)
     target_date = today_pacific()
     print(
-        f"RIN Watch fetch | provider={PROVIDER_CODE} | "
+        f"RIN Watch fetch | providers=PG&E + CCA | "
         f"checking values for {target_date.isoformat()} (America/Los_Angeles)"
     )
     print(f"Database: {db_file}")

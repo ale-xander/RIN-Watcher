@@ -163,6 +163,22 @@ export function Dashboard() {
     [failedRins, successfulRins],
   );
 
+  // The chips scope the current component, not the provider-wide payload: HFP
+  // RINs carry no segment (their category is `other`), so counting them would
+  // make "All" read 902 on the PG&E tabs and leave an "Other" chip that only
+  // HFP populates. The matrices below still receive `allRins` — they need both
+  // PG&E components to fill their columns. Providers without a component split
+  // (the CCAs, `component === null`) keep every RIN.
+  const chipRins = useMemo(() => {
+    if (!showComponentToggle) {
+      return allRins;
+    }
+    if (component === "hfp") {
+      return EMPTY_RINS;
+    }
+    return allRins.filter((entry) => entry.component === component);
+  }, [allRins, component, showComponentToggle]);
+
   // Chip counts describe the payload in memory (no refetch on click); "nbt" is
   // detected from the enrollment codes, the rest come from the stored segment.
   const categoryCounts = useMemo(() => {
@@ -174,7 +190,7 @@ export function Dashboard() {
       nbt: 0,
       other: 0,
     };
-    for (const entry of allRins) {
+    for (const entry of chipRins) {
       counts.all += 1;
       counts[entry.category] += 1;
       if (isNbt(entry)) {
@@ -182,7 +198,7 @@ export function Dashboard() {
       }
     }
     return counts;
-  }, [allRins]);
+  }, [chipRins]);
 
   const chips = useMemo<CategoryChip[]>(() => {
     const list: CategoryChip[] = [
@@ -383,7 +399,9 @@ export function Dashboard() {
             />
           ) : null}
 
-          {data ? (
+          {/* HFP RINs have no segment, so the category chips have no meaning
+              on that tab: the strip is the whole HFP headline. */}
+          {data && !isHfp ? (
             <CategoryChips
               chips={chips}
               active={category}

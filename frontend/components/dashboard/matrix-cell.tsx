@@ -138,7 +138,16 @@ function renderValue(cell: MatrixCell) {
 export function MatrixHeadline({ cell }: { cell: MatrixCell }) {
   return (
     <div className="text-[12px] text-gray-700">
-      <b className="text-red-600">{cell.missing}</b> missing
+      <b
+        className={
+          cell.missing > 0
+            ? "text-red-600"
+            : "text-green-600"
+        }
+      >
+        {cell.missing}
+      </b>{" "}
+      missing
       {cell.notInMidas > 0 ? (
         <>
           <span className="text-gray-400"> · </span>

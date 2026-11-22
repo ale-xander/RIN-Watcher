@@ -29,6 +29,12 @@ export type Drill =
   | { kind: "main"; row: MainRowKey; col: MainColKey }
   /** One cell of the segment/component x NBT vintage matrix. */
   | { kind: "nbt"; row: NbtRowKey; col: NbtColKey }
+  /**
+   * The Master RIN List: a provider-wide list scoped to one PG&E component,
+   * with no segment restriction. HFP is absent on purpose — the `hfp` drill
+   * below already is the HFP-wide universe.
+   */
+  | { kind: "component"; component: "bundled" | "unbundled" }
   /** The HFP strip: PG&E HFP RINs, CCA-owned HFP excluded. */
   | { kind: "hfp" }
   /** Provider-wide list, used for providers without a component split. */
@@ -44,6 +50,8 @@ export function sameDrill(a: Drill, b: Drill): boolean {
       return b.kind === "main" && a.row === b.row && a.col === b.col;
     case "nbt":
       return b.kind === "nbt" && a.row === b.row && a.col === b.col;
+    case "component":
+      return b.kind === "component" && a.component === b.component;
     default:
       return true;
   }
@@ -107,6 +115,10 @@ export function drillBaselineRins(rins: RinEntry[], drill: Drill): RinEntry[] {
         );
       });
     }
+    case "component":
+      // The Master RIN List: every RIN of the chosen component, whatever its
+      // segment, so the table can show it all without a matrix cell.
+      return rins.filter((rin) => rin.component === drill.component);
   }
 }
 

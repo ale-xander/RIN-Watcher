@@ -1,15 +1,19 @@
 import { COMPONENT_LABELS, COMPONENT_OPTIONS } from "@/lib/constants";
 import type { Component } from "@/lib/types";
+import type { ReactNode } from "react";
 
 export function ComponentToggle({
   component,
   onChange,
+  action,
 }: {
   component: Component;
   onChange: (component: Component) => void;
+  /** Optional control rendered immediately right of the toggle. */
+  action?: ReactNode;
 }) {
   return (
-    <div className="mb-4">
+    <div className="mb-4 flex flex-wrap items-center gap-3">
       <div
         role="group"
         aria-label="PG&E component"
@@ -34,6 +38,7 @@ export function ComponentToggle({
           );
         })}
       </div>
+      {action}
     </div>
   );
 }

@@ -1,9 +1,12 @@
 // The drill's result list: one row per RIN in the drill.
 //
-// Status tabs split the drill's RINs three ways — Missing / Healthy / Pending —
-// and the table lists only the active tab's rows. The parent decides which tab
-// opens (a red cell opens Missing, a green cell opens Healthy) and the counts
-// for every tab come from the full universe this file receives.
+// Status tabs split the drill's RINs four ways — All / Missing / Healthy /
+// Pending — and the table lists only the active tab's rows. "All" is the Master
+// RIN List tab: it shows the whole drill rather than one status, and the parent
+// opens it with `statusFilter: "all"` when no matrix cell was clicked. The
+// parent decides which tab opens (a red cell opens Missing, a green cell opens
+// Healthy) and the counts for every tab come from the full universe this file
+// receives.
 //
 // Columns adapt to the drill instead of rendering empty ones: Vintage only when
 // the drill contains NBT RINs, Voltage/Discount/DR/Other only when at least one
@@ -332,12 +335,17 @@ function compareRowsForSort(
 }
 
 /** The status tabs a drill can open on. "pending" covers every RIN MIDAS has
- *  no status row for that is not actionable today (pending launches included). */
-export type RinStatusTab = "missing" | "healthy" | "pending";
+ *  no status row for that is not actionable today (pending launches included);
+ *  "all" is the Master RIN List tab, which shows the whole drill. */
+export type RinStatusTab = "all" | "missing" | "healthy" | "pending";
+
+/** The buckets a single row can belong to: "all" is a view over the other
+ *  three, never a bucket of its own. */
+type RowStatusTab = Exclude<RinStatusTab, "all">;
 
 /** Which tab a row belongs to; `classifyDisplayStatus` already splits
  *  not-in-MIDAS into "pending launch" and a real data gap. */
-function statusTabOf(status: RinDisplayStatus): RinStatusTab {
+function statusTabOf(status: RinDisplayStatus): RowStatusTab {
   if (status === "no_price") return "missing";
   if (status === "healthy") return "healthy";
   return "pending";
@@ -391,6 +399,7 @@ export function AffectedRinsTable({
   // describe rows the active tab does not show.
   const statusTabCounts = useMemo(() => {
     const counts: Record<RinStatusTab, number> = {
+      all: 0,
       missing: 0,
       healthy: 0,
       pending: 0,
@@ -398,12 +407,18 @@ export function AffectedRinsTable({
     for (const row of rows) {
       counts[statusTabOf(row.status)] += 1;
     }
+    // "All" is the sum of the three buckets, not a fourth one.
+    counts.all = counts.missing + counts.healthy + counts.pending;
     return counts;
   }, [rows]);
 
-  // Search, column filters and sorting all work inside the active tab.
+  // Search, column filters and sorting all work inside the active tab. "All"
+  // is the whole drill, which is what makes the Master RIN List one table.
   const tabRows = useMemo(
-    () => rows.filter((row) => statusTabOf(row.status) === activeStatusTab),
+    () =>
+      activeStatusTab === "all"
+        ? rows
+        : rows.filter((row) => statusTabOf(row.status) === activeStatusTab),
     [rows, activeStatusTab],
   );
 
@@ -578,13 +593,18 @@ export function AffectedRinsTable({
     setFilters(createEmptyFilters());
   }
 
+  // "All" means the Master RIN List: the drill is not a failure report, so the
+  // panel must not be titled "Affected RINs".
+  const isMasterList = activeStatusTab === "all";
+  const tableLabel = isMasterList ? "All RINs" : "Affected RINs";
+
   return (
     <section
       className="overflow-hidden rounded-lg border border-gray-200 bg-white"
-      aria-label="Affected RINs"
+      aria-label={tableLabel}
     >
       <div className="flex flex-wrap items-center justify-between gap-3 px-4 pt-3">
-        <h2 className="text-sm font-semibold text-gray-900">Affected RINs</h2>
+        <h2 className="text-sm font-semibold text-gray-900">{tableLabel}</h2>
         <div className="flex flex-wrap items-center justify-end gap-3">
           {selectedRins.size > 0 ? (
             <span className="text-xs text-gray-500">
@@ -602,7 +622,7 @@ export function AffectedRinsTable({
               value={searchInput}
               onChange={(event) => setSearchInput(event.target.value)}
               placeholder="Search RIN, tariff, or attribute..."
-              aria-label="Search affected RINs"
+              aria-label="Search RINs"
               className="w-56 rounded-md border border-gray-200 bg-white py-1.5 pl-8 pr-7 text-xs text-gray-700 placeholder:text-gray-400 focus:border-gray-400 focus:outline-none focus:ring-1 focus:ring-gray-300 sm:w-64"
             />
             {searchInput.length > 0 ? (
@@ -629,6 +649,12 @@ export function AffectedRinsTable({
         aria-label="RIN status"
         className="mt-2 flex gap-4 border-b border-gray-200 px-4"
       >
+        <TabButton
+          active={activeStatusTab === "all"}
+          onClick={() => onStatusTabChange("all")}
+        >
+          All ({statusTabCounts.all})
+        </TabButton>
         <TabButton
           active={activeStatusTab === "missing"}
           onClick={() => onStatusTabChange("missing")}
@@ -669,7 +695,7 @@ export function AffectedRinsTable({
                     checked={allSelected}
                     onChange={toggleAll}
                     disabled={visibleRows.length === 0}
-                    aria-label="Select all shown affected RINs"
+                    aria-label="Select all shown RINs"
                     className="h-3.5 w-3.5 cursor-pointer accent-gray-900 disabled:cursor-not-allowed"
                   />
                 </th>

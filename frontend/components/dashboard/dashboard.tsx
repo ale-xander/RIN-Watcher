@@ -86,6 +86,7 @@ const NBT_COL_LABELS: Record<NbtColKey, string> = {
 
 /** Breadcrumb label for each status tab of the affected-RINs table. */
 const STATUS_LABELS: Record<RinStatusTab, string> = {
+  all: "All",
   missing: "Missing",
   healthy: "Healthy",
   pending: "Pending Launch",
@@ -172,6 +173,8 @@ function drillKeyOf(drill: Drill): string {
       return `main:${drill.row}:${drill.col}`;
     case "nbt":
       return `nbt:${drill.row}:${drill.col}`;
+    case "component":
+      return `component:${drill.component}`;
     default:
       return drill.kind;
   }
@@ -197,6 +200,9 @@ function drillScopeLabels(drill: Drill): string[] {
         NBT_COL_LABELS[drill.col],
       ];
     }
+    case "component":
+      // The Master RIN List: one component, every segment.
+      return [COL_LABELS[drill.component], "All segments"];
     case "hfp":
       return ["HFP"];
     case "provider":
@@ -463,6 +469,21 @@ export function Dashboard() {
     setDrill((current) =>
       current !== null && sameDrill(current, candidate) ? current : candidate,
     );
+  }
+
+  /**
+   * The Master RIN List: open the whole current component (and the active
+   * category chip) at once, without picking a matrix cell. The drill is
+   * provider-wide but component-scoped, and it opens on the table's "All" tab
+   * so nothing is filtered out. HFP has no segment grid, so it reuses the
+   * strip's own drill — that already is the HFP-wide universe.
+   */
+  function handleViewAllRins() {
+    const next: Drill =
+      component === "hfp" ? { kind: "hfp" } : { kind: "component", component };
+    // Not `openDrill`: that keeps the open drill's status tab on a re-click,
+    // while this entry point always means "show every status".
+    setDrill({ ...next, statusFilter: "all" } as DrillState);
   }
 
   /** The table's tabs; the drill owns the filter so the pill can mirror it. */
@@ -752,6 +773,19 @@ export function Dashboard() {
             <ComponentToggle
               component={component}
               onChange={handleComponentChange}
+              // The entry point to the Master RIN List. It needs a payload: the
+              // drill it opens is built from the RINs in memory, not a refetch.
+              action={
+                data ? (
+                  <button
+                    type="button"
+                    onClick={handleViewAllRins}
+                    className="rounded-md border border-gray-200 bg-white px-2 py-1 text-[12px] text-gray-600 transition hover:bg-gray-50"
+                  >
+                    View All RINs
+                  </button>
+                ) : null
+              }
             />
           ) : null}
 
@@ -834,12 +868,17 @@ export function Dashboard() {
                     onBack={showComponentToggle ? closeDrill : undefined}
                     onClear={clearDrillFilters}
                   />
-                  <PatternStrip
-                    affectedRins={drillAffected}
-                    baselineRins={drillBaseline}
-                    onAttributeClick={toggleAttribute}
-                    activeAttributes={activeAttributes}
-                  />
+                  {/* The strip describes what failed, so it would read as a
+                      bug report over the Master RIN List's "All" tab: hide it
+                      there instead of recomputing it over a healthy list. */}
+                  {effectiveDrill.statusFilter !== "all" ? (
+                    <PatternStrip
+                      affectedRins={drillAffected}
+                      baselineRins={drillBaseline}
+                      onAttributeClick={toggleAttribute}
+                      activeAttributes={activeAttributes}
+                    />
+                  ) : null}
                   <AffectedRinsTable
                     rins={drillRows}
                     drillKey={`${providerId}:${drillKeyOf(effectiveDrill)}`}

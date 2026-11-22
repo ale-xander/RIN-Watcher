@@ -1,8 +1,11 @@
 // Drill breadcrumb + filter controls: "Bundled × Non-Res × Missing" pill, the
-// back affordance, the not-yet-live toggle and a "clear all" escape hatch.
+// back affordance and a "clear all" escape hatch.
 //
 // Stateless on purpose: segments arrive already formatted and every control
-// calls back into the parent, which owns the drill's filter state.
+// calls back into the parent, which owns the drill's filter state. The status
+// segment ("Missing" / "Healthy" / "Pending Launch") is part of the breadcrumb:
+// it mirrors the affected-RINs table's active status tab, so there is no status
+// switch here.
 
 export interface FilterPillProps {
   /** Breadcrumb labels in drill order, e.g. ["Bundled", "Non-Res", "NBT"]. */
@@ -10,17 +13,9 @@ export interface FilterPillProps {
   /** Renders the back button; omit when there is nowhere to go back to. */
   onBack?: () => void;
   onClear: () => void;
-  showNotYetLive: boolean;
-  onToggleNotYetLive: (v: boolean) => void;
 }
 
-export function FilterPill({
-  segments,
-  onBack,
-  onClear,
-  showNotYetLive,
-  onToggleNotYetLive,
-}: FilterPillProps) {
+export function FilterPill({ segments, onBack, onClear }: FilterPillProps) {
   return (
     <div className="flex flex-wrap items-center gap-3">
       {onBack ? (
@@ -47,16 +42,6 @@ export function FilterPill({
           ✕
         </button>
       </div>
-
-      <label className="flex items-center gap-1.5 text-[11px] text-gray-500">
-        <input
-          type="checkbox"
-          checked={showNotYetLive}
-          onChange={(event) => onToggleNotYetLive(event.target.checked)}
-          className="h-3.5 w-3.5 accent-gray-900"
-        />
-        show not-yet-live
-      </label>
 
       <button
         type="button"

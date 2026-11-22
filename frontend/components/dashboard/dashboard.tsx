@@ -13,9 +13,12 @@
 // them, every drill opened from them.
 //
 // Clicking a cell opens the drill below the matrices: the filter pill
-// (breadcrumb + not-yet-live toggle), the pattern chips ("what do the failing
-// RINs have in common") and the affected-RINs table with its copy button. This
-// file owns the state; every counting rule lives in `lib/`.
+// (breadcrumb, whose last segment is the status tab), the pattern chips ("what
+// do the failing RINs have in common") and the affected-RINs table with its
+// status tabs and copy button. A click defaults the table to the status its
+// cell is about — a red cell opens Missing, a green cell Healthy — so a drill
+// never opens on an empty list. This file owns the state; every counting rule
+// lives in `lib/`.
 
 import { useEffect, useMemo, useRef, useState } from "react";
 
@@ -26,17 +29,18 @@ import {
   EMPTY_RINS,
 } from "@/lib/constants";
 import {
-  affectedRins as selectAffectedRins,
   drillBaselineRins,
   filterByAttributes,
   sameDrill,
   sortByStaleness,
 } from "@/lib/drill";
 import type { Drill, MainColKey, MainRowKey, NbtColKey } from "@/lib/drill";
+import type { MatrixCell } from "@/lib/health-matrix";
 import { isNbt } from "@/lib/rin-utils";
 import type { CategoryChip, CategoryFilter, Component } from "@/lib/types";
 
 import { AffectedRinsTable } from "./affected-rins-table";
+import type { RinStatusTab } from "./affected-rins-table";
 import { CategoryChips } from "./category-chips";
 import { ComponentToggle } from "./component-toggle";
 import { DashboardSkeleton } from "./dashboard-skeleton";
@@ -71,6 +75,28 @@ const NBT_COL_LABELS: Record<NbtColKey, string> = {
   floating: "Floating",
   all: "All vintages",
 };
+
+/** Breadcrumb label for each status tab of the affected-RINs table. */
+const STATUS_LABELS: Record<RinStatusTab, string> = {
+  missing: "Missing",
+  healthy: "Healthy",
+  pending: "Pending Launch",
+};
+
+/** One open drill plus the status tab it opened on. */
+type DrillState = Drill & { statusFilter: RinStatusTab };
+
+/**
+ * The status tab a click should open: the cell's missing count wins because
+ * that is what the matrix is about; a clean cell opens on its healthy RINs; a
+ * cell holding only not-yet-live RINs opens on Pending. A drill opened without
+ * a cell (a provider-wide view) keeps the caller's default.
+ */
+function getDefaultStatus(cell: MatrixCell): RinStatusTab {
+  if (cell.missing > 0) return "missing";
+  if (cell.healthy > 0) return "healthy";
+  return "pending";
+}
 
 /** Stable identity of a drill cell: the affected table resets its own search,
  *  filters and sort when this changes, but keeps them across toggles. */
@@ -115,11 +141,10 @@ function drillScopeLabels(drill: Drill): string[] {
 export function Dashboard() {
   const [component, setComponent] = useState<Component>(DEFAULT_COMPONENT);
   const [category, setCategory] = useState<CategoryFilter>("all");
-  const [drill, setDrill] = useState<Drill | null>(null);
+  const [drill, setDrill] = useState<DrillState | null>(null);
   const [activeAttributes, setActiveAttributes] = useState<Set<string>>(
     () => new Set(),
   );
-  const [showNotYetLive, setShowNotYetLive] = useState(false);
   const [selectedRins, setSelectedRins] = useState<Set<string>>(
     () => new Set(),
   );
@@ -150,21 +175,8 @@ export function Dashboard() {
     setCategory("all");
     setDrill(null);
     setActiveAttributes(new Set());
-    setShowNotYetLive(false);
     setSelectedRins(new Set());
   }, [providerId, requestComponent]);
-
-  // A new drill starts unfiltered and brings itself into view. Re-clicking the
-  // same cell keeps the same object, so it does not yank the page around.
-  useEffect(() => {
-    if (!drill) {
-      return;
-    }
-    setActiveAttributes(new Set());
-    setShowNotYetLive(false);
-    setSelectedRins(new Set());
-    drillRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
-  }, [drill]);
 
   const failedRins = data?.failed_rins ?? EMPTY_RINS;
   const successfulRins = data?.successful_rins ?? EMPTY_RINS;
@@ -250,11 +262,17 @@ export function Dashboard() {
   }, [allRins, category]);
 
   // Providers without a component split (the CCAs) have no matrix to click, so
-  // their dashboard opens straight into a provider-wide list.
-  const effectiveDrill = useMemo<Drill | null>(
-    () => (showComponentToggle ? drill : { kind: "provider" }),
-    [showComponentToggle, drill],
-  );
+  // their dashboard opens straight into a provider-wide list. The status tab
+  // still needs an owner, so it hangs off the synthesized provider drill.
+  const effectiveDrill = useMemo<DrillState | null>(() => {
+    if (showComponentToggle) {
+      return drill;
+    }
+    return {
+      kind: "provider",
+      statusFilter: drill?.statusFilter ?? "missing",
+    };
+  }, [showComponentToggle, drill]);
 
   const drillBaseline = useMemo(
     () =>
@@ -263,31 +281,27 @@ export function Dashboard() {
         : EMPTY_RINS,
     [scopedRins, effectiveDrill],
   );
+
+  // The pattern strip describes what failed: the drill's missing RINs, before
+  // the pattern chips. The table instead receives every status and splits it
+  // into tabs, which is what makes the Healthy and Pending rows reachable.
   const drillAffected = useMemo(
-    () => selectAffectedRins(drillBaseline, showNotYetLive),
-    [drillBaseline, showNotYetLive],
-  );
-  // Drives the empty state's "include N not-yet-live RINs" shortcut: with none
-  // in the baseline, turning the toggle on could not add a row.
-  const drillNotYetLiveCount = useMemo(
-    () =>
-      drillBaseline.filter((entry) => entry.status_kind === "not_in_midas")
-        .length,
+    () => drillBaseline.filter((entry) => entry.status_kind === "missing"),
     [drillBaseline],
   );
-  const affectedRows = useMemo(
-    () => sortByStaleness(filterByAttributes(drillAffected, activeAttributes)),
-    [drillAffected, activeAttributes],
+  const drillRows = useMemo(
+    () => sortByStaleness(filterByAttributes(drillBaseline, activeAttributes)),
+    [drillBaseline, activeAttributes],
   );
 
   // Drop checks that no longer exist so the copy button can never reference a
-  // RIN that left the drill (attribute chip, not-yet-live toggle, refresh).
+  // RIN that left the drill (attribute chip, status tab, refresh).
   useEffect(() => {
     setSelectedRins((current) => {
       if (current.size === 0) {
         return current;
       }
-      const available = new Set(affectedRows.map((entry) => entry.rin));
+      const available = new Set(drillRows.map((entry) => entry.rin));
       const next = new Set<string>();
       let pruned = false;
       for (const rin of current) {
@@ -299,39 +313,69 @@ export function Dashboard() {
       }
       return pruned ? next : current;
     });
-  }, [affectedRows]);
+  }, [drillRows]);
+
+  // A different cell (or a different provider) is a new question: it starts
+  // unfiltered and brings itself into view. Switching status tabs changes the
+  // open drill's state, not its identity, so it must neither scroll the page
+  // nor drop the user's pattern chips.
+  const drillIdentity = useMemo(
+    () =>
+      effectiveDrill ? `${providerId}:${drillKeyOf(effectiveDrill)}` : null,
+    [providerId, effectiveDrill],
+  );
+  useEffect(() => {
+    if (drillIdentity === null || !showComponentToggle) {
+      return;
+    }
+    setActiveAttributes(new Set());
+    setSelectedRins(new Set());
+    drillRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, [drillIdentity, showComponentToggle]);
 
   const drillSegments = useMemo(() => {
     if (!effectiveDrill) {
       return [];
     }
     const segments = drillScopeLabels(effectiveDrill);
-    segments.push(showNotYetLive ? "Missing + not-yet-live" : "Missing");
+    segments.push(STATUS_LABELS[effectiveDrill.statusFilter]);
     if (category !== "all") {
       segments.push(CATEGORY_LABELS[category].group);
     }
     segments.push(...activeAttributes);
     return segments;
-  }, [effectiveDrill, showNotYetLive, category, activeAttributes]);
+  }, [effectiveDrill, category, activeAttributes]);
 
-  function openDrill(next: Drill) {
-    // Same cell: keep the object so the scroll/reset effect stays quiet.
+  /**
+   * Open a drill on the status its cell is about; a caller with no cell (the
+   * provider-wide view) keeps the default. Same cell keeps the object, so the
+   * scroll/reset effect stays quiet and the user's tab survives a re-click.
+   */
+  function openDrill(next: Drill, statusFilter: RinStatusTab = "missing") {
+    const candidate = { ...next, statusFilter } as DrillState;
     setDrill((current) =>
-      current !== null && sameDrill(current, next) ? current : next,
+      current !== null && sameDrill(current, candidate) ? current : candidate,
+    );
+  }
+
+  /** The table's tabs; the drill owns the filter so the pill can mirror it. */
+  function handleStatusTabChange(statusFilter: RinStatusTab) {
+    setDrill((current) =>
+      current === null
+        ? { kind: "provider", statusFilter }
+        : { ...current, statusFilter },
     );
   }
 
   function closeDrill() {
     setDrill(null);
     setActiveAttributes(new Set());
-    setShowNotYetLive(false);
     setSelectedRins(new Set());
   }
 
   /** The pill's "clear all": drop the drill's filters, keep the drill open. */
   function clearDrillFilters() {
     setActiveAttributes(new Set());
-    setShowNotYetLive(false);
     setSelectedRins(new Set());
   }
 
@@ -440,31 +484,39 @@ export function Dashboard() {
                   // is the whole HFP headline.
                   <HfpStrip
                     rins={scopedRins}
-                    onCellClick={() => openDrill({ kind: "hfp" })}
+                    onCellClick={(cell) =>
+                      openDrill({ kind: "hfp" }, getDefaultStatus(cell))
+                    }
                   />
                 ) : (
                   <>
                     <HealthMatrix
                       rins={scopedRins}
                       selected={drill?.kind === "main" ? drill : null}
-                      onCellClick={(_cell, selection) =>
-                        openDrill({
-                          kind: "main",
-                          row: selection.row,
-                          col: selection.col,
-                        })
+                      onCellClick={(cell, selection) =>
+                        openDrill(
+                          {
+                            kind: "main",
+                            row: selection.row,
+                            col: selection.col,
+                          },
+                          getDefaultStatus(cell),
+                        )
                       }
                     />
 
                     <NbtMatrix
                       rins={scopedRins}
                       selected={drill?.kind === "nbt" ? drill : null}
-                      onCellClick={(_cell, selection) =>
-                        openDrill({
-                          kind: "nbt",
-                          row: selection.row,
-                          col: selection.col,
-                        })
+                      onCellClick={(cell, selection) =>
+                        openDrill(
+                          {
+                            kind: "nbt",
+                            row: selection.row,
+                            col: selection.col,
+                          },
+                          getDefaultStatus(cell),
+                        )
                       }
                     />
                   </>
@@ -481,8 +533,6 @@ export function Dashboard() {
                     segments={drillSegments}
                     onBack={showComponentToggle ? closeDrill : undefined}
                     onClear={clearDrillFilters}
-                    showNotYetLive={showNotYetLive}
-                    onToggleNotYetLive={setShowNotYetLive}
                   />
                   <PatternStrip
                     affectedRins={drillAffected}
@@ -491,11 +541,10 @@ export function Dashboard() {
                     activeAttributes={activeAttributes}
                   />
                   <AffectedRinsTable
-                    rins={affectedRows}
+                    rins={drillRows}
                     drillKey={`${providerId}:${drillKeyOf(effectiveDrill)}`}
-                    showNotYetLive={showNotYetLive}
-                    onShowNotYetLiveChange={setShowNotYetLive}
-                    notYetLiveCount={drillNotYetLiveCount}
+                    activeStatusTab={effectiveDrill.statusFilter}
+                    onStatusTabChange={handleStatusTabChange}
                     selectedRins={selectedRins}
                     onSelectionChange={setSelectedRins}
                   />

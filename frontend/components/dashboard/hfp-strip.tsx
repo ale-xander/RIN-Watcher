@@ -10,14 +10,16 @@
 
 import { CCA_HFP_RATE_NAME } from "@/lib/constants";
 import { buildHfpStrip } from "@/lib/health-matrix";
+import type { MatrixCell } from "@/lib/health-matrix";
 import type { RinEntry } from "@/lib/types";
 
 import { MatrixCellView } from "./matrix-cell";
 
 export interface HfpStripProps {
   rins: RinEntry[];
-  /** Whole strip is one click target; the parent decides what it drills into. */
-  onCellClick?: () => void;
+  /** Whole strip is one click target; the parent decides what it drills into.
+   *  The cell rides along so the drill can default to the status it shows. */
+  onCellClick?: (cell: MatrixCell) => void;
 }
 
 export function HfpStrip({ rins, onCellClick }: HfpStripProps) {
@@ -37,7 +39,7 @@ export function HfpStrip({ rins, onCellClick }: HfpStripProps) {
         <span className="text-sm font-semibold text-gray-300">—</span>
       ) : (
         <div className="min-w-[110px]">
-          <MatrixCellView cell={strip} onClick={onCellClick} />
+          <MatrixCellView cell={strip} onClick={() => onCellClick?.(strip)} />
         </div>
       )}
 

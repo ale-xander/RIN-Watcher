@@ -1,19 +1,25 @@
-// The drill's result list: one row per affected RIN.
+// The drill's result list: one row per RIN in the drill.
+//
+// Status tabs split the drill's RINs three ways — Missing / Healthy / Pending —
+// and the table lists only the active tab's rows. The parent decides which tab
+// opens (a red cell opens Missing, a green cell opens Healthy) and the counts
+// for every tab come from the full universe this file receives.
 //
 // Columns adapt to the drill instead of rendering empty ones: Vintage only when
 // the drill contains NBT RINs, Voltage/Discount/DR/Other only when at least one
-// row carries that attribute. Rows are already filtered by the parent; this file
-// owns rendering, the checkbox selection, and the table-local search, column
-// filters and sorting.
+// row carries that attribute. Rows are already filtered by the parent's pattern
+// chips; this file owns rendering, the checkbox selection, and the table-local
+// search, column filters and sorting.
 //
 // Search, filters and sort are pure frontend transforms computed in useMemo, so
 // narrowing a long list never refetches. `drillKey` is the reset boundary: a new
-// drill starts clean, while the drill's own toggles (not-yet-live, attribute
+// drill starts clean, while the drill's own toggles (status tab, attribute
 // chips) keep the user's search and filters in place.
 
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import type { ReactNode } from "react";
 import { ListFilter, Search, X } from "lucide-react";
 
 import { classifyAttributes } from "@/lib/attribute-groups";
@@ -325,17 +331,29 @@ function compareRowsForSort(
   return compareRows(a, b, column) * order;
 }
 
+/** The status tabs a drill can open on. "pending" covers every RIN MIDAS has
+ *  no status row for that is not actionable today (pending launches included). */
+export type RinStatusTab = "missing" | "healthy" | "pending";
+
+/** Which tab a row belongs to; `classifyDisplayStatus` already splits
+ *  not-in-MIDAS into "pending launch" and a real data gap. */
+function statusTabOf(status: RinDisplayStatus): RinStatusTab {
+  if (status === "no_price") return "missing";
+  if (status === "healthy") return "healthy";
+  return "pending";
+}
+
 export interface AffectedRinsTableProps {
-  /** The drill's affected rows, already filtered by the pattern chips. */
+  /** Every RIN in the drill (all statuses), already filtered by the pattern
+   *  chips. The table splits it into status tabs itself, so the tab counts
+   *  describe the whole drill while the rows show one tab at a time. */
   rins: RinEntry[];
   /** Stable identity of the open drill. A new drill resets search, filters
-   *  and sort; other prop changes (status toggles, chips) keep them. */
+   *  and sort; other prop changes (status tab, chips) keep them. */
   drillKey: string;
-  showNotYetLive: boolean;
-  onShowNotYetLiveChange: (value: boolean) => void;
-  /** How many `not_in_midas` RINs the drill's baseline holds; hides the
-   *  empty-state shortcut when turning the toggle on could not add a row. */
-  notYetLiveCount?: number;
+  /** Which status tab is open; the parent owns it so the pill can show it. */
+  activeStatusTab: RinStatusTab;
+  onStatusTabChange: (status: RinStatusTab) => void;
   /** Checked RINs; the copy button narrows to them. */
   selectedRins: Set<string>;
   onSelectionChange: (next: Set<string>) => void;
@@ -348,9 +366,8 @@ function formatVintage(vintage: NbtVintage): string {
 export function AffectedRinsTable({
   rins,
   drillKey,
-  showNotYetLive,
-  onShowNotYetLiveChange,
-  notYetLiveCount = 0,
+  activeStatusTab,
+  onStatusTabChange,
   selectedRins,
   onSelectionChange,
 }: AffectedRinsTableProps) {
@@ -370,11 +387,31 @@ export function AffectedRinsTable({
   const [filters, setFilters] = useState<FilterState>(createEmptyFilters);
   const [sort, setSort] = useState<SortState>(DEFAULT_SORT);
 
+  // Every tab's count, from the drill's full universe: the tabs have to
+  // describe rows the active tab does not show.
+  const statusTabCounts = useMemo(() => {
+    const counts: Record<RinStatusTab, number> = {
+      missing: 0,
+      healthy: 0,
+      pending: 0,
+    };
+    for (const row of rows) {
+      counts[statusTabOf(row.status)] += 1;
+    }
+    return counts;
+  }, [rows]);
+
+  // Search, column filters and sorting all work inside the active tab.
+  const tabRows = useMemo(
+    () => rows.filter((row) => statusTabOf(row.status) === activeStatusTab),
+    [rows, activeStatusTab],
+  );
+
   // A different cell is a new question: start with RIN ascending and no
   // narrowing. Resetting during render (rather than in an effect) means the
   // new drill never paints with the previous drill's narrowing. The drill's
-  // own toggles leave `drillKey` alone, so comparing Missing with Missing +
-  // not-yet-live does not force re-entering a search.
+  // own toggles leave `drillKey` alone, so switching status tabs or chips does
+  // not force re-entering a search.
   const [lastDrillKey, setLastDrillKey] = useState(drillKey);
   if (lastDrillKey !== drillKey) {
     setLastDrillKey(drillKey);
@@ -395,9 +432,9 @@ export function AffectedRinsTable({
   const searchedRows = useMemo(() => {
     const needle = search.trim().toLowerCase();
     if (needle === "") {
-      return rows;
+      return tabRows;
     }
-    return rows.filter(
+    return tabRows.filter(
       (row) =>
         row.rin.rin.toLowerCase().includes(needle) ||
         (row.rin.tariff ?? "").toLowerCase().includes(needle) ||
@@ -407,7 +444,7 @@ export function AffectedRinsTable({
         (row.rin.last_success_date !== null &&
           row.rin.last_success_date.toLowerCase().includes(needle)),
     );
-  }, [rows, search]);
+  }, [tabRows, search]);
 
   const visibleRows = useMemo(() => {
     const filtered = searchedRows.filter((row) => matchesFilters(row, filters));
@@ -437,26 +474,6 @@ export function AffectedRinsTable({
     (count, key) => count + (filters[key].size > 0 ? 1 : 0),
     0,
   );
-
-  // Counts for the summary strip: it disambiguates the matrix's coarse
-  // notInMidas count once the not-yet-live toggle brings those RINs in. It
-  // follows the visible rows so the strip and the table never disagree.
-  const statusCounts = useMemo(() => {
-    const counts = { noPrice: 0, notInMidas: 0, pendingLaunch: 0 };
-    for (const row of visibleRows) {
-      if (row.status === "no_price") {
-        counts.noPrice += 1;
-      } else if (row.status === "not_in_midas") {
-        counts.notInMidas += 1;
-      } else if (row.status === "pending_launch") {
-        counts.pendingLaunch += 1;
-      }
-    }
-    return counts;
-  }, [visibleRows]);
-
-  const showSummaryStrip =
-    statusCounts.notInMidas + statusCounts.pendingLaunch > 0;
 
   const columns = useMemo<Column[]>(() => {
     const list: Column[] = [
@@ -566,7 +583,7 @@ export function AffectedRinsTable({
       className="overflow-hidden rounded-lg border border-gray-200 bg-white"
       aria-label="Affected RINs"
     >
-      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-gray-200 px-4 py-3">
+      <div className="flex flex-wrap items-center justify-between gap-3 px-4 pt-3">
         <h2 className="text-sm font-semibold text-gray-900">Affected RINs</h2>
         <div className="flex flex-wrap items-center justify-end gap-3">
           {selectedRins.size > 0 ? (
@@ -607,38 +624,38 @@ export function AffectedRinsTable({
         </div>
       </div>
 
-      {showSummaryStrip ? (
-        <div className="flex gap-3 border-b border-gray-100 bg-gray-50/50 px-5 py-3 text-xs text-gray-500">
-          <span>{visibleRows.length} shown</span>
-          {statusCounts.noPrice > 0 ? (
-            <span>· {statusCounts.noPrice} no price</span>
-          ) : null}
-          {statusCounts.notInMidas > 0 ? (
-            <span className="font-medium text-amber-700">
-              · {statusCounts.notInMidas} not in MIDAS
-            </span>
-          ) : null}
-          {statusCounts.pendingLaunch > 0 ? (
-            <span className="text-gray-400">
-              · {statusCounts.pendingLaunch} pending launch
-            </span>
-          ) : null}
-        </div>
-      ) : null}
+      <div
+        role="tablist"
+        aria-label="RIN status"
+        className="mt-2 flex gap-4 border-b border-gray-200 px-4"
+      >
+        <TabButton
+          active={activeStatusTab === "missing"}
+          onClick={() => onStatusTabChange("missing")}
+        >
+          Missing ({statusTabCounts.missing})
+        </TabButton>
+        <TabButton
+          active={activeStatusTab === "healthy"}
+          onClick={() => onStatusTabChange("healthy")}
+        >
+          ✓ Healthy ({statusTabCounts.healthy})
+        </TabButton>
+        {/* Hidden when empty, unless it is the open tab (a refresh or a chip
+            can empty it, and the tab must stay visible to be switched off). */}
+        {statusTabCounts.pending > 0 || activeStatusTab === "pending" ? (
+          <TabButton
+            active={activeStatusTab === "pending"}
+            onClick={() => onStatusTabChange("pending")}
+          >
+            Pending Launch ({statusTabCounts.pending})
+          </TabButton>
+        ) : null}
+      </div>
 
       {rows.length === 0 ? (
         <div className="px-6 py-10 text-center text-sm text-gray-500">
-          <p>No RINs match this filter</p>
-          {!showNotYetLive && notYetLiveCount > 0 ? (
-            <button
-              type="button"
-              onClick={() => onShowNotYetLiveChange(true)}
-              className="mt-2 text-xs font-medium text-gray-600 underline underline-offset-2 transition-colors hover:text-gray-900"
-            >
-              Include {notYetLiveCount} not-yet-live RIN
-              {notYetLiveCount === 1 ? "" : "s"}
-            </button>
-          ) : null}
+          <p>No RINs match</p>
         </div>
       ) : (
         <div className="overflow-x-auto">
@@ -724,14 +741,16 @@ export function AffectedRinsTable({
                     colSpan={columns.length + 1}
                     className="px-6 py-10 text-center text-sm text-gray-500"
                   >
-                    <p>No RINs match this search or filter</p>
-                    <button
-                      type="button"
-                      onClick={clearSearchAndFilters}
-                      className="mt-2 text-xs font-medium text-gray-600 underline underline-offset-2 transition-colors hover:text-gray-900"
-                    >
-                      Clear search and filters
-                    </button>
+                    <p>No RINs match</p>
+                    {searchInput.trim() !== "" || activeFilterCount > 0 ? (
+                      <button
+                        type="button"
+                        onClick={clearSearchAndFilters}
+                        className="mt-2 text-xs font-medium text-gray-600 underline underline-offset-2 transition-colors hover:text-gray-900"
+                      >
+                        Clear search and filters
+                      </button>
+                    ) : null}
                   </td>
                 </tr>
               ) : (
@@ -764,7 +783,6 @@ export function AffectedRinsTable({
         <span className="text-xs text-gray-500">
           {visibleRows.length} shown
           {visibleRows.length !== rows.length ? ` of ${rows.length}` : ""}
-          {showNotYetLive ? " · incl. not-yet-live" : ""}
           {activeFilterCount > 0 ? ` · ${activeFilterCount} filter${activeFilterCount === 1 ? "" : "s"}` : ""}
         </span>
         <CopyButton
@@ -905,6 +923,33 @@ function StatusCell({ status }: { status: RinDisplayStatus }) {
         </td>
       );
   }
+}
+
+/** One status tab: an underline tab, active when it owns the table. */
+function TabButton({
+  active,
+  onClick,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      role="tab"
+      aria-selected={active}
+      onClick={onClick}
+      className={`-mb-px border-b-2 px-0.5 pb-2 text-xs font-medium transition-colors ${
+        active
+          ? "border-gray-900 text-gray-900"
+          : "border-transparent text-gray-500 hover:text-gray-700"
+      }`}
+    >
+      {children}
+    </button>
+  );
 }
 
 /**

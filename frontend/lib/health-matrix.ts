@@ -89,15 +89,19 @@ export interface NbtMatrix {
 
 export type NbtRowKey = keyof NbtMatrix["rows"];
 
-/** Render order for the NBT rows, bundled before unbundled. */
-export const NBT_ROW_KEYS: NbtRowKey[] = [
-  "bundled-ag",
-  "bundled-non_res",
+/**
+ * Render order for the NBT rows: segment first (Residential, Non-Res, AG), then
+ * component (bundled before unbundled). `satisfies` keeps the list in lockstep
+ * with `NbtMatrix["rows"]`.
+ */
+export const NBT_ROW_KEYS = [
   "bundled-resid",
-  "unbundled-ag",
-  "unbundled-non_res",
   "unbundled-resid",
-];
+  "bundled-non_res",
+  "unbundled-non_res",
+  "bundled-ag",
+  "unbundled-ag",
+] as const satisfies readonly NbtRowKey[];
 
 export interface HfpStrip {
   total: number;

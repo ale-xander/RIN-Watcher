@@ -2,7 +2,11 @@
 // plus the row/column totals. Pure presentation over `buildNbtMatrix`; the
 // parent owns whichever cell is selected and decides what a click drills into.
 
-import { NBT_VINTAGES, buildNbtMatrix } from "@/lib/health-matrix";
+import {
+  NBT_ROW_KEYS,
+  NBT_VINTAGES,
+  buildNbtMatrix,
+} from "@/lib/health-matrix";
 import type { MatrixCell, NbtRowKey as NbtBodyRowKey } from "@/lib/health-matrix";
 import type { NbtVintage } from "@/lib/nbt-vintage";
 import type { RinEntry } from "@/lib/types";
@@ -17,15 +21,20 @@ export interface NbtMatrixSelection {
   col: NbtColKey;
 }
 
+/** Display label for each segment/component row. */
+const ROW_LABELS: Record<NbtBodyRowKey, string> = {
+  "bundled-resid": "Bundled · Residential",
+  "unbundled-resid": "Unbundled · Residential",
+  "bundled-non_res": "Bundled · Non-Res",
+  "unbundled-non_res": "Unbundled · Non-Res",
+  "bundled-ag": "Bundled · AG",
+  "unbundled-ag": "Unbundled · AG",
+};
+
 /** Segment/component rows in render order; `all` is the total row, appended. */
-const BODY_ROWS: { key: NbtBodyRowKey; label: string }[] = [
-  { key: "bundled-ag", label: "Bundled · AG" },
-  { key: "bundled-non_res", label: "Bundled · Non-Res" },
-  { key: "bundled-resid", label: "Bundled · Residential" },
-  { key: "unbundled-ag", label: "Unbundled · AG" },
-  { key: "unbundled-non_res", label: "Unbundled · Non-Res" },
-  { key: "unbundled-resid", label: "Unbundled · Residential" },
-];
+const BODY_ROWS: { key: NbtBodyRowKey; label: string }[] = NBT_ROW_KEYS.map(
+  (key) => ({ key, label: ROW_LABELS[key] }),
+);
 
 /** Display label per vintage: the placeholder column reads as "Floating". */
 const VINTAGE_LABELS: Record<NbtVintage, string> = {

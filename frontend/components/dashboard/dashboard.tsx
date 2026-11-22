@@ -25,6 +25,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   CATEGORY_LABELS,
   CATEGORY_ORDER,
+  DASHBOARD_URL,
   DEFAULT_COMPONENT,
   EMPTY_RINS,
 } from "@/lib/constants";
@@ -36,12 +37,14 @@ import {
 } from "@/lib/drill";
 import type { Drill, MainColKey, MainRowKey, NbtColKey } from "@/lib/drill";
 import type { MatrixCell } from "@/lib/health-matrix";
+import { normalizeDashboard } from "@/lib/normalize";
 import { isNbt } from "@/lib/rin-utils";
 import type {
   Category,
   CategoryChip,
   CategoryFilter,
   Component,
+  Dashboard,
 } from "@/lib/types";
 
 import { AffectedRinsTable } from "./affected-rins-table";
@@ -87,6 +90,53 @@ const STATUS_LABELS: Record<RinStatusTab, string> = {
   healthy: "Healthy",
   pending: "Pending Launch",
 };
+
+/** The proxy route that queues POST /api/admin/fetch on the Fly API. */
+const REFRESH_URL = "/api/refresh";
+/** Poll cadence once a fetch is queued (the fetch itself runs 2–3 min). */
+const REFRESH_POLL_INTERVAL_MS = 4_000;
+/** How long the button waits for the fresh payload before standing down. */
+const REFRESH_POLL_TIMEOUT_MS = 60_000;
+/** How long "Last checked" stays green after a refresh lands. */
+const FRESHNESS_FLASH_MS = 2_000;
+
+/** One click's poll loop: cancelled on success, timeout, unmount or a switch. */
+type RefreshRun = {
+  cancelled: boolean;
+  controller: AbortController | null;
+  timer: ReturnType<typeof setTimeout> | null;
+  /** Resolver of the inter-poll pause, so an abort never leaves it pending. */
+  wake: (() => void) | null;
+};
+
+/** Stop a poll loop: cancel it, wake it out of its pause, abort its request. */
+function abortRefreshRun(run: RefreshRun | null): void {
+  if (run === null) {
+    return;
+  }
+  run.cancelled = true;
+  if (run.timer !== null) {
+    clearTimeout(run.timer);
+    run.timer = null;
+  }
+  run.wake?.();
+  run.wake = null;
+  run.controller?.abort();
+}
+
+/** Best-effort JSON object body; every proxy reply is a small JSON object. */
+async function readJsonBody(
+  response: Response,
+): Promise<Record<string, unknown> | null> {
+  try {
+    const value: unknown = await response.json();
+    return value !== null && typeof value === "object"
+      ? (value as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Chips that select an enrollment PROGRAM, not a tariff segment. A program card
@@ -166,6 +216,15 @@ export function Dashboard() {
   );
   const drillRef = useRef<HTMLElement>(null);
 
+  // Manual refresh: a landed poll stores its payload here, and the hook's own
+  // payload (see `data` below) always supersedes it.
+  const [polledData, setPolledData] = useState<Dashboard | null>(null);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [refreshMessage, setRefreshMessage] = useState<string | null>(null);
+  const [flashFreshness, setFlashFreshness] = useState(false);
+  const refreshRunRef = useRef<RefreshRun | null>(null);
+  const flashTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   // The matrices need every component at once, so the request is always the
   // provider-wide snapshot; `component` only picks the headline below.
   const {
@@ -176,23 +235,49 @@ export function Dashboard() {
     showComponentToggle,
     requestComponent,
     dashboardState,
-    data,
+    data: fetchedData,
     providersLoading,
     dashboardLoading,
     reloadProviders,
     reloadDashboard,
   } = useDashboardData("all");
 
+  // A refresh that has landed is newer than the payload the hook fetched, so it
+  // stands in for it until the hook fetches again.
+  const data = polledData ?? fetchedData;
+
   const isHfp = showComponentToggle && component === "hfp";
 
   // A new provider/component means new RINs: every drill, filter and check on
-  // the old ones is stale.
+  // the old ones is stale, and so is a payload a refresh poll stored.
   useEffect(() => {
     setCategory("all");
     setDrill(null);
     setActiveAttributes(new Set());
     setSelectedRins(new Set());
+    setPolledData(null);
+    // A switch mid-refresh abandons that poll: it belongs to the old provider.
+    abortRefreshRun(refreshRunRef.current);
+    refreshRunRef.current = null;
+    setIsRefreshing(false);
+    setRefreshMessage(null);
   }, [providerId, requestComponent]);
+
+  // Anything the hook itself fetches (a retry, a switch) supersedes a poll.
+  useEffect(() => {
+    setPolledData(null);
+  }, [fetchedData]);
+
+  // Stop any in-flight poll and pending flash if the dashboard unmounts.
+  useEffect(
+    () => () => {
+      abortRefreshRun(refreshRunRef.current);
+      if (flashTimeoutRef.current !== null) {
+        clearTimeout(flashTimeoutRef.current);
+      }
+    },
+    [],
+  );
 
   const failedRins = data?.failed_rins ?? EMPTY_RINS;
   const successfulRins = data?.successful_rins ?? EMPTY_RINS;
@@ -423,6 +508,166 @@ export function Dashboard() {
     closeDrill();
   }
 
+  /** Drop the loop a previous click started, if any. */
+  function stopRefreshRun() {
+    abortRefreshRun(refreshRunRef.current);
+    refreshRunRef.current = null;
+  }
+
+  /**
+   * Queue a fetch through the proxy, then poll the payload until its freshness
+   * marker moves. The proxy answers 202 (queued), 409 (a fetch is already
+   * running — poll straight away) or 429 (this instance's cooldown).
+   */
+  async function handleRefresh() {
+    if (isRefreshing) {
+      return;
+    }
+    stopRefreshRun();
+    const run: RefreshRun = {
+      cancelled: false,
+      controller: null,
+      timer: null,
+      wake: null,
+    };
+    refreshRunRef.current = run;
+    setRefreshMessage(null);
+
+    // The API sends MAX(fetched_at) pre-formatted ("Nov 10, 2026 · 5:00 AM PT"),
+    // so a marker that changed — not a parsed comparison — means a fetch landed.
+    const previousFreshness = data?.last_checked ?? null;
+
+    let response: Response;
+    try {
+      response = await fetch(REFRESH_URL, {
+        method: "POST",
+        cache: "no-store",
+        headers: { Accept: "application/json" },
+      });
+    } catch {
+      if (run.cancelled) {
+        return;
+      }
+      refreshRunRef.current = null;
+      setRefreshMessage("Refresh failed — try again");
+      return;
+    }
+    if (run.cancelled || refreshRunRef.current !== run) {
+      return;
+    }
+
+    const body = await readJsonBody(response);
+
+    if (response.status === 429) {
+      refreshRunRef.current = null;
+      const retryAfter = body?.retryAfterMs;
+      setRefreshMessage(
+        typeof retryAfter === "number" && Number.isFinite(retryAfter)
+          ? `Just refreshed — try again in ${Math.ceil(retryAfter / 1000)}s`
+          : "Just refreshed — try again shortly",
+      );
+      return;
+    }
+
+    if (response.status !== 202 && response.status !== 409) {
+      refreshRunRef.current = null;
+      setRefreshMessage("Refresh failed — try again");
+      return;
+    }
+
+    if (response.status === 409) {
+      setRefreshMessage("Fetch already running — this takes ~2–3 min");
+    }
+    setIsRefreshing(true);
+    await pollUntilFresh(run, previousFreshness);
+  }
+
+  /**
+   * Poll the provider-wide payload every 4s for up to 60s, stopping the moment
+   * the freshness marker moves past `previous`.
+   */
+  async function pollUntilFresh(run: RefreshRun, previous: string | null) {
+    const startedAt = Date.now();
+    const url = `${DASHBOARD_URL}/${encodeURIComponent(providerId)}?component=all`;
+
+    for (;;) {
+      if (run.cancelled) {
+        return;
+      }
+      const remaining = REFRESH_POLL_TIMEOUT_MS - (Date.now() - startedAt);
+      if (remaining <= 0) {
+        break;
+      }
+
+      const controller = new AbortController();
+      run.controller = controller;
+      try {
+        const response = await fetch(url, {
+          signal: controller.signal,
+          cache: "no-store",
+          headers: { Accept: "application/json" },
+        });
+        if (response.ok) {
+          const payload = normalizeDashboard(
+            await response.json(),
+            providerId,
+            "all",
+          );
+          if (run.cancelled) {
+            return;
+          }
+          if (
+            payload.last_checked !== null &&
+            payload.last_checked !== previous
+          ) {
+            finishRefresh(payload);
+            return;
+          }
+        }
+      } catch {
+        // A dropped poll is not fatal: keep trying until the deadline.
+        if (run.cancelled) {
+          return;
+        }
+      } finally {
+        run.controller = null;
+      }
+
+      await new Promise<void>((resolve) => {
+        const wait = Math.max(0, Math.min(REFRESH_POLL_INTERVAL_MS, remaining));
+        run.wake = resolve;
+        run.timer = setTimeout(() => {
+          run.timer = null;
+          run.wake = null;
+          resolve();
+        }, wait);
+      });
+    }
+
+    if (run.cancelled) {
+      return;
+    }
+    refreshRunRef.current = null;
+    setIsRefreshing(false);
+    setRefreshMessage("Still running — check back shortly");
+  }
+
+  /** Store the polled payload, stop spinning and flash "Last checked" green. */
+  function finishRefresh(payload: Dashboard) {
+    refreshRunRef.current = null;
+    setIsRefreshing(false);
+    setRefreshMessage(null);
+    setPolledData(payload);
+    setFlashFreshness(true);
+    if (flashTimeoutRef.current !== null) {
+      clearTimeout(flashTimeoutRef.current);
+    }
+    flashTimeoutRef.current = setTimeout(() => {
+      flashTimeoutRef.current = null;
+      setFlashFreshness(false);
+    }, FRESHNESS_FLASH_MS);
+  }
+
   const isLoading = providersLoading || dashboardLoading;
   const lastChecked = data?.last_checked ?? null;
 
@@ -433,13 +678,45 @@ export function Dashboard() {
           <h1 className="text-3xl font-semibold tracking-tight">RIN Watch</h1>
           <p className="text-sm text-gray-500">MIDAS rate publication monitor</p>
         </div>
-        <p className="pt-1 text-sm text-gray-500">
-          <span
-            className="bg-green-500 w-2 h-2 rounded-full inline-block mr-2"
-            aria-hidden="true"
-          />
-          Last checked: {lastChecked ?? "—"}
-        </p>
+        <div className="flex flex-col items-end gap-1 pt-1">
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={() => {
+                void handleRefresh();
+              }}
+              disabled={isRefreshing}
+              className="inline-flex items-center gap-1.5 rounded-md border border-gray-200 bg-white px-2 py-1 text-[12px] text-gray-600 transition hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {isRefreshing ? (
+                <>
+                  <span
+                    className="inline-block h-3 w-3 animate-spin rounded-full border-2 border-gray-300 border-t-gray-600"
+                    aria-hidden="true"
+                  />
+                  Refreshing…
+                </>
+              ) : (
+                "Refresh data"
+              )}
+            </button>
+            <p className="text-sm text-gray-500">
+              <span
+                className="bg-green-500 w-2 h-2 rounded-full inline-block mr-2"
+                aria-hidden="true"
+              />
+              Last checked:{" "}
+              <span className={flashFreshness ? "text-green-600" : undefined}>
+                {lastChecked ?? "—"}
+              </span>
+            </p>
+          </div>
+          {refreshMessage !== null ? (
+            <p role="status" className="text-[12px] text-gray-500">
+              {refreshMessage}
+            </p>
+          ) : null}
+        </div>
       </header>
 
       {providersState.status === "error" ? (

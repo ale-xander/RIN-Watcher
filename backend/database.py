@@ -117,9 +117,13 @@ def get_fetch_lock_path(db_path: DbPath = None) -> Path:
 
     The lock sits next to the SQLite file instead of living in memory, so the
     API server, each of its workers and the ``fetch_data.py`` CLI all contend
-    for the same lock.
+    for the same lock. The suffix is appended to the full file name (e.g.
+    ``/data/rin_watch.db`` -> ``/data/rin_watch.db.fetch.lock``); using
+    ``Path.with_suffix`` would replace ``.db`` and make ``a.db`` and ``a.sqlite``
+    share one lock.
     """
-    return get_db_path(db_path).with_suffix(".fetch.lock")
+    db = get_db_path(db_path)
+    return db.with_name(db.name + ".fetch.lock")
 
 
 def get_connection(db_path: DbPath = None) -> sqlite3.Connection:

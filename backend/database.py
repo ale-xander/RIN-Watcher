@@ -112,6 +112,16 @@ def get_db_path(db_path: DbPath = None) -> Path:
     return Path(env_path).expanduser() if env_path else DEFAULT_DB_PATH
 
 
+def get_fetch_lock_path(db_path: DbPath = None) -> Path:
+    """Lock file that serialises fetches for this database.
+
+    The lock sits next to the SQLite file instead of living in memory, so the
+    API server, each of its workers and the ``fetch_data.py`` CLI all contend
+    for the same lock.
+    """
+    return get_db_path(db_path).with_suffix(".fetch.lock")
+
+
 def get_connection(db_path: DbPath = None) -> sqlite3.Connection:
     """Open a connection with row access by name and foreign keys enabled."""
     path = get_db_path(db_path)

@@ -19,11 +19,10 @@ import hmac
 import json
 import os
 import sys
-import threading
 from contextlib import asynccontextmanager, closing
 from datetime import datetime
 from pathlib import Path
-from typing import Annotated, Any
+from typing import IO, Annotated, Any
 
 import pytz
 from dotenv import load_dotenv
@@ -77,8 +76,10 @@ PGE_COMPONENTS = (*COMPONENT_PREFIXES, HFP_COMPONENT)
 DASHBOARD_COMPONENTS = (*PGE_COMPONENTS, ALL_COMPONENT)
 
 # One fetch at a time: concurrent runs would fight over the same SQLite file and
-# hammer the MIDAS API. Acquired by the endpoint, released by the worker.
-_fetch_lock = threading.Lock()
+# hammer the MIDAS API. The guard is an fcntl.flock on a file next to the
+# database (see fetch_data.acquire_fetch_lock), not an in-process lock, so the
+# fetch_data.py CLI and every API worker share it. Acquired by the endpoint,
+# released by the worker.
 
 # Resolved once at import time: RIN_WATCH_DB when set (e.g. /data/rin_watch.db
 # on Render), otherwise backend/rin_watch.db. fetch_data.py resolves the same
@@ -398,10 +399,10 @@ def get_dashboard(
     }
 
 
-def _run_fetch(db_path: Path) -> None:
+def _run_fetch(db_path: Path, lock: IO[str]) -> None:
     """Run the MIDAS fetch on a worker thread and release the fetch lock."""
     try:
-        exit_code = fetch_data.process(db_path)
+        exit_code = fetch_data.process(db_path, lock)
         print(f"RIN Watch fetch finished with exit code {exit_code}", flush=True)
     except Exception as exc:  # noqa: BLE001 - a failed run must not kill the server
         print(
@@ -410,7 +411,7 @@ def _run_fetch(db_path: Path) -> None:
             flush=True,
         )
     finally:
-        _fetch_lock.release()
+        fetch_data.release_fetch_lock(lock)
 
 
 @app.post("/api/admin/fetch", status_code=202)
@@ -439,13 +440,17 @@ def trigger_fetch(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    if not _fetch_lock.acquire(blocking=False):
-        raise HTTPException(status_code=409, detail="A fetch is already running")
+    try:
+        lock = fetch_data.acquire_fetch_lock(DB_PATH)
+    except fetch_data.FetchAlreadyRunning:
+        raise HTTPException(
+            status_code=409, detail="A fetch is already running"
+        ) from None
 
     try:
-        background_tasks.add_task(_run_fetch, DB_PATH)
+        background_tasks.add_task(_run_fetch, DB_PATH, lock)
     except Exception:
-        _fetch_lock.release()
+        fetch_data.release_fetch_lock(lock)
         raise
 
     return {"status": "accepted", "message": "Fetch queued"}

@@ -28,18 +28,24 @@ The database location is resolved as: ``--db`` argument, then the
 ``RIN_WATCH_DB`` environment variable (set to ``/data/rin_watch.db`` in
 production), then ``backend/rin_watch.db``. ``main.py`` uses the same helper,
 so the API server always reads the file this script writes.
+
+Only one fetch runs at a time: an ``fcntl.flock`` on ``<database>.fetch.lock``
+(see ``acquire_fetch_lock``) is shared with the API server and its workers, so
+a run started while another one is in flight exits with a non-zero status
+instead of hammering MIDAS and fighting over the same SQLite file.
 """
 
 from __future__ import annotations
 
 import argparse
+import fcntl
 import math
 import sys
 import time
 from contextlib import closing
 from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import Any
+from typing import IO, Any
 
 import pytz
 import requests
@@ -47,9 +53,11 @@ from dotenv import load_dotenv
 
 from database import (
     BACKEND_DIR,
+    DbPath,
     delete_test_rins,
     get_connection,
     get_db_path,
+    get_fetch_lock_path,
     init_db,
     save_status,
 )
@@ -82,6 +90,39 @@ RIN_LIST_TIMEOUT = 120  # seconds; the full RIN list is roughly 14 MB
 MAX_ATTEMPTS = 3
 RETRY_BACKOFF = 2.0  # seconds, multiplied by the attempt number
 USER_AGENT = "RIN-Watch/0.1"
+
+
+class FetchAlreadyRunning(RuntimeError):
+    """Another process holds the fetch lock for this database."""
+
+
+def acquire_fetch_lock(db_path: DbPath = None) -> IO[str]:
+    """Take the cross-process fetch lock, or raise :class:`FetchAlreadyRunning`.
+
+    ``fcntl.flock`` is tied to the open file rather than to the process, so the
+    API server, every one of its workers and the ``fetch_data.py`` CLI contend
+    for the same lock file. A ``threading.Lock`` would only guard one process.
+
+    Returns the open handle that owns the lock; the caller must pass it to
+    :func:`release_fetch_lock` when the fetch is done.
+    """
+    lock_path = get_fetch_lock_path(db_path)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = open(lock_path, "a+")
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        handle.close()
+        raise FetchAlreadyRunning(f"another fetch holds {lock_path}") from None
+    return handle
+
+
+def release_fetch_lock(handle: IO[str]) -> None:
+    """Unlock and close a handle returned by :func:`acquire_fetch_lock`."""
+    try:
+        fcntl.flock(handle, fcntl.LOCK_UN)
+    finally:
+        handle.close()
 
 
 def today_pacific() -> date:
@@ -262,13 +303,30 @@ def fetch_rin_list(session: requests.Session) -> list[tuple[str, str]]:
     return rin_entries(payload)
 
 
-def process(db_path: Path | None = None) -> int:
+def process(db_path: Path | None = None, lock: IO[str] | None = None) -> int:
     """Fetch the RIN list, then read realtime values for the registered ones.
 
     Only RINs that already exist in ``rins`` with ``is_active = 1`` are fetched;
     unknown and inactive RINs are counted and skipped (see the module docstring).
     Returns a shell exit code.
+
+    ``lock`` is a handle from :func:`acquire_fetch_lock`. When omitted the fetch
+    takes the lock itself (and raises :class:`FetchAlreadyRunning` if another
+    process holds it); the API passes the handle it already acquired, so the
+    endpoint and its background worker share one lock.
     """
+    handle = lock
+    if handle is None:
+        handle = acquire_fetch_lock(db_path)
+    try:
+        return _process_locked(db_path)
+    finally:
+        if lock is None:
+            release_fetch_lock(handle)
+
+
+def _process_locked(db_path: Path | None = None) -> int:
+    """The fetch itself; the caller must hold the fetch lock."""
     session = requests.Session()
     session.headers["User-Agent"] = USER_AGENT
 
@@ -429,7 +487,11 @@ def main(argv: list[str] | None = None) -> int:
     db_path = get_db_path(args.db)
     if args.clean_test_rins:
         return clean_test_rins(db_path)
-    return process(db_path)
+    try:
+        return process(db_path)
+    except FetchAlreadyRunning as exc:
+        print(f"already running: {exc}", file=sys.stderr, flush=True)
+        return 1
 
 
 if __name__ == "__main__":

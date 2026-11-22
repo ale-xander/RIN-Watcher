@@ -72,6 +72,19 @@ const NBT_COL_LABELS: Record<NbtColKey, string> = {
   all: "All vintages",
 };
 
+/** Stable identity of a drill cell: the affected table resets its own search,
+ *  filters and sort when this changes, but keeps them across toggles. */
+function drillKeyOf(drill: Drill): string {
+  switch (drill.kind) {
+    case "main":
+      return `main:${drill.row}:${drill.col}`;
+    case "nbt":
+      return `nbt:${drill.row}:${drill.col}`;
+    default:
+      return drill.kind;
+  }
+}
+
 /** Breadcrumb labels for a drill, before the status and filter segments. */
 function drillScopeLabels(drill: Drill): string[] {
   switch (drill.kind) {
@@ -479,6 +492,7 @@ export function Dashboard() {
                   />
                   <AffectedRinsTable
                     rins={affectedRows}
+                    drillKey={`${providerId}:${drillKeyOf(effectiveDrill)}`}
                     showNotYetLive={showNotYetLive}
                     onShowNotYetLiveChange={setShowNotYetLive}
                     notYetLiveCount={drillNotYetLiveCount}

@@ -1,11 +1,13 @@
 // Shared cell renderer for the two dashboard matrices (HealthMatrix, NbtMatrix).
 //
 // Purely presentational: every number arrives pre-computed on a `MatrixCell`,
-// so this file only maps (rag, missing/healthy, notInMidas) onto the v3 mockup
-// style. The big number is the cell's *missing* count shown against its
-// actionable denominator ("40 of 158") — the action the matrix is about — and
-// the bar fills with that same missing share, matching the RAG level beside it.
-// Not-yet-live RINs sit outside that denominator, so they get their own line.
+// so this file only maps (rag, missing/healthy/notInMidas/total) onto the v3
+// mockup style. The big number is the cell's *missing* count shown against the
+// cell's FULL total ("40 of 224"), so a column adds up to the "All segments"
+// cell below it and the segment chips above it. The bar deliberately keeps the
+// ACTIONABLE denominator (missing / (missing + healthy)): not-yet-live RINs
+// cannot fail a fetch, and 40/158 is the health rate that matters. Those RINs
+// still get their own line so the printed total stays reconcilable.
 
 import type { KeyboardEvent } from "react";
 
@@ -84,7 +86,8 @@ function renderEmpty() {
 
 function renderValue(cell: MatrixCell) {
   const level = cell.rag === "empty" ? "green" : cell.rag;
-  // Same denominator as the RAG level: not-yet-live RINs are not failures.
+  // The bar keeps the RAG denominator: not-yet-live RINs are not failures, so
+  // 40 of 158 actionable RINs still reads as the same red 25% it always did.
   const actionableTotal = cell.missing + cell.healthy;
   const missingShare =
     actionableTotal > 0 ? (cell.missing / actionableTotal) * 100 : 0;
@@ -92,17 +95,17 @@ function renderValue(cell: MatrixCell) {
   return (
     <>
       <span className={`text-sm font-semibold tabular-nums ${VALUE_CLASS[level]}`}>
-        {cell.missing}
+        {cell.missing}{" "}
+        {/* Printed denominator is the cell total, so rows/columns reconcile. */}
+        <span className="text-[11px] font-normal text-gray-500">
+          of {cell.total}
+        </span>
         {cell.missing === 0 ? (
-          <span aria-hidden="true"> ✓</span>
-        ) : (
-          <>
+          <span aria-hidden="true" className="text-green-600">
             {" "}
-            <span className="text-[11px] font-normal text-gray-500">
-              of {actionableTotal}
-            </span>
-          </>
-        )}
+            ✓
+          </span>
+        ) : null}
       </span>
 
       <div

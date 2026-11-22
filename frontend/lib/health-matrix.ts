@@ -303,6 +303,27 @@ export function buildMainMatrix(rins: RinEntry[]): MainMatrix {
     all: mergeCells(SEGMENT_KEYS.map((segment) => rows[segment].all)),
   };
 
+  // Dev-time bug detector: every column total is the sum of the cells printed
+  // above it, so the dashboard's "62 of 429" always reconciles with "0 of 85",
+  // "40 of 224" and "22 of 120". `total` (not just `missing`) is compared
+  // because that is the number the matrix prints as its denominator.
+  for (const component of COMPONENT_KEYS) {
+    const columnSum = SEGMENT_KEYS.reduce(
+      (sum, segment) => sum + rows[segment][component].total,
+      0,
+    );
+    assertEqual(
+      `main matrix: ${component} total vs segment rows`,
+      colTotals[component].total,
+      columnSum,
+    );
+  }
+  assertEqual(
+    "main matrix: all-component total vs segment rows",
+    colTotals.all.total,
+    SEGMENT_KEYS.reduce((sum, segment) => sum + rows[segment].all.total, 0),
+  );
+
   const grandTotal = mergeCells(
     COMPONENT_KEYS.map((component) => colTotals[component]),
   );

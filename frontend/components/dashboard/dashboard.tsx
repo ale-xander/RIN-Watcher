@@ -37,7 +37,12 @@ import {
 import type { Drill, MainColKey, MainRowKey, NbtColKey } from "@/lib/drill";
 import type { MatrixCell } from "@/lib/health-matrix";
 import { isNbt } from "@/lib/rin-utils";
-import type { CategoryChip, CategoryFilter, Component } from "@/lib/types";
+import type {
+  Category,
+  CategoryChip,
+  CategoryFilter,
+  Component,
+} from "@/lib/types";
 
 import { AffectedRinsTable } from "./affected-rins-table";
 import type { RinStatusTab } from "./affected-rins-table";
@@ -82,6 +87,17 @@ const STATUS_LABELS: Record<RinStatusTab, string> = {
   healthy: "Healthy",
   pending: "Pending Launch",
 };
+
+/**
+ * Chips that select an enrollment PROGRAM, not a tariff segment. A program card
+ * overlaps the segments (an NBT RIN is also Residential/Non-Res/AG), so its
+ * count never adds up with theirs and it must not sit in the segment row.
+ */
+const PROGRAM_FILTERS: Category[] = ["nbt"];
+
+function isProgramFilter(id: CategoryFilter): boolean {
+  return (PROGRAM_FILTERS as CategoryFilter[]).includes(id);
+}
 
 /** One open drill plus the status tab it opened on. */
 type DrillState = Drill & { statusFilter: RinStatusTab };
@@ -225,7 +241,7 @@ export function Dashboard() {
     return counts;
   }, [chipRins]);
 
-  const chips = useMemo<CategoryChip[]>(() => {
+  const { segmentChips, programChips } = useMemo(() => {
     const list: CategoryChip[] = [
       { id: "all", label: "All", count: categoryCounts.all },
       ...CATEGORY_ORDER.map((id) => ({
@@ -236,7 +252,13 @@ export function Dashboard() {
     ];
     // Zero-count chips collapse, except the active one: keeping it visible
     // means the filter can always be switched back off.
-    return list.filter((chip) => chip.count > 0 || chip.id === category);
+    const visible = list.filter(
+      (chip) => chip.count > 0 || chip.id === category,
+    );
+    return {
+      segmentChips: visible.filter((chip) => !isProgramFilter(chip.id)),
+      programChips: visible.filter((chip) => isProgramFilter(chip.id)),
+    };
   }, [categoryCounts, category]);
 
   // A refresh can remove the last RIN of the active segment; fall back to All
@@ -460,7 +482,8 @@ export function Dashboard() {
               on that tab: the strip is the whole HFP headline. */}
           {data && !isHfp ? (
             <CategoryChips
-              chips={chips}
+              segments={segmentChips}
+              programs={programChips}
               active={category}
               onChange={handleCategoryChange}
             />

@@ -140,6 +140,25 @@ async function readJsonBody(
 }
 
 /**
+ * The newest per-RIN `fetched_at` in a payload, i.e. when a fetch last wrote
+ * status rows. Values are ISO-8601 UTC strings, so plain string comparison
+ * orders them; `null` means no RIN has been checked yet.
+ */
+function latestFetchedAt(data: Dashboard | null): string | null {
+  if (data === null) {
+    return null;
+  }
+  let latest: string | null = null;
+  for (const entry of [...data.successful_rins, ...data.failed_rins]) {
+    const fetchedAt = entry.fetched_at ?? null;
+    if (fetchedAt !== null && (latest === null || fetchedAt > latest)) {
+      latest = fetchedAt;
+    }
+  }
+  return latest;
+}
+
+/**
  * Chips that select an enrollment PROGRAM, not a tariff segment. A program card
  * overlaps the segments (an NBT RIN is also Residential/Non-Res/AG), so its
  * count never adds up with theirs and it must not sit in the segment row.
@@ -554,9 +573,9 @@ export function Dashboard() {
     refreshRunRef.current = run;
     setRefreshMessage(null);
 
-    // The API sends MAX(fetched_at) pre-formatted ("Nov 10, 2026 · 5:00 AM PT"),
-    // so a marker that changed — not a parsed comparison — means a fetch landed.
-    const previousFreshness = data?.last_checked ?? null;
+    // The payload exposes each RIN's raw `fetched_at` (ISO-8601 UTC), so a
+    // lexicographic bump past this marker means a fetch wrote new status rows.
+    const previousFreshness = latestFetchedAt(data);
 
     let response: Response;
     try {
@@ -637,9 +656,10 @@ export function Dashboard() {
           if (run.cancelled) {
             return;
           }
+          const freshness = latestFetchedAt(payload);
           if (
-            payload.last_checked !== null &&
-            payload.last_checked !== previous
+            freshness !== null &&
+            (previous === null || freshness > previous)
           ) {
             finishRefresh(payload);
             return;

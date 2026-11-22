@@ -44,6 +44,7 @@ export function normalizeRinEntry(raw: unknown): RinEntry | null {
       typeof row.last_success_date === "string" ? row.last_success_date : null,
     last_success:
       typeof row.last_success === "string" ? row.last_success : null,
+    fetched_at: typeof row.fetched_at === "string" ? row.fetched_at : null,
   };
 }
 

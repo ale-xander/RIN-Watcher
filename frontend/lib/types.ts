@@ -42,6 +42,12 @@ export type RinEntry = {
   status_kind?: "healthy" | "missing" | "not_in_midas";
   last_success_date: string | null;
   last_success: string | null;
+  /**
+   * ISO-8601 UTC timestamp of this RIN's last status check. The refresh poll
+   * compares it lexicographically to tell when a fetch has landed; `null` (or
+   * absent, on older payloads) means the RIN has never been checked.
+   */
+  fetched_at?: string | null;
 };
 
 export type Dashboard = {

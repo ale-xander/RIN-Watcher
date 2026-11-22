@@ -229,6 +229,11 @@ def _status_kind(row: Any) -> str:
 
 def _rin_entry(row: Any) -> dict[str, Any]:
     """One dashboard row: identity, grouping fields and today's status."""
+    # ``status.fetched_at`` is stored as an ISO-8601 UTC string; the isinstance
+    # guard keeps this working if a row factory ever returns a datetime.
+    fetched_at = row["fetched_at"]
+    if fetched_at is not None and not isinstance(fetched_at, str):
+        fetched_at = fetched_at.isoformat()
     return {
         "rin": row["rin"],
         "rate_name": row["rate_name"],
@@ -241,6 +246,8 @@ def _rin_entry(row: Any) -> dict[str, Any]:
         "last_success_date": row["last_success_date"],
         # Kept for the current frontend; the display-formatted success date.
         "last_success": _format_date(row["last_success_date"]),
+        # Raw ISO timestamp of this RIN's last check, for refresh polling.
+        "fetched_at": fetched_at,
     }
 
 

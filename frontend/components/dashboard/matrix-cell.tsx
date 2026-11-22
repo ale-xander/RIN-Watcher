@@ -1,10 +1,11 @@
 // Shared cell renderer for the two dashboard matrices (HealthMatrix, NbtMatrix).
 //
 // Purely presentational: every number arrives pre-computed on a `MatrixCell`,
-// so this file only maps (rag, missing/total, never, notInMidas) onto the v3
-// mockup style. The big number is the cell's *missing* count — the action the
-// matrix is about — and the bar fills with that same missing share of the
-// actionable RINs, matching the RAG level beside it.
+// so this file only maps (rag, missing/healthy, notInMidas) onto the v3 mockup
+// style. The big number is the cell's *missing* count shown against its
+// actionable denominator ("40 of 158") — the action the matrix is about — and
+// the bar fills with that same missing share, matching the RAG level beside it.
+// Not-yet-live RINs sit outside that denominator, so they get their own line.
 
 import type { KeyboardEvent } from "react";
 
@@ -92,9 +93,16 @@ function renderValue(cell: MatrixCell) {
     <>
       <span className={`text-sm font-semibold tabular-nums ${VALUE_CLASS[level]}`}>
         {cell.missing}
-        {level === "green" ? (
+        {cell.missing === 0 ? (
           <span aria-hidden="true"> ✓</span>
-        ) : null}
+        ) : (
+          <>
+            {" "}
+            <span className="text-[11px] font-normal text-gray-500">
+              of {actionableTotal}
+            </span>
+          </>
+        )}
       </span>
 
       <div
@@ -113,12 +121,6 @@ function renderValue(cell: MatrixCell) {
           />
         )}
       </div>
-
-      {cell.never > 0 ? (
-        <span className="text-[10px] text-gray-500">
-          {cell.never} never priced
-        </span>
-      ) : null}
 
       {cell.notInMidas > 0 ? (
         <div className="text-[10px] text-gray-500 leading-tight">

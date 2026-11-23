@@ -72,3 +72,56 @@ export type DashboardState =
   | { status: "ready"; data: Dashboard };
 
 export type CategoryChip = { id: CategoryFilter; label: string; count: number };
+
+/**
+ * Ops CSV import payloads (`POST /api/ops/preview` and `POST /api/ops/commit`).
+ *
+ * The backend classifies an add-only CSV three ways: rows it would add, rows
+ * whose RIN already exists (conflicts, carrying the stored and CSV snapshots)
+ * and rows rejected before the DB check (skipped, one message each). The
+ * commit response adds the `counts` tally the success screen reports.
+ */
+export type OpsAddedRin = {
+  rin: string;
+  prefix: string;
+  provider_code: string;
+  /** Derived from the RIN prefix by the importer; never stored. */
+  component: Component;
+  tariff: string | null;
+  enrollment_codes: string[];
+  category: Segment;
+};
+
+/** The CSV-owned fields of a planned row. */
+export type OpsCsvSnapshot = {
+  tariff: string | null;
+  enrollment_codes: string[];
+  category: Segment;
+};
+
+/** What the database already holds for a conflicting RIN. */
+export type OpsDbSnapshot = OpsCsvSnapshot & {
+  is_active: 0 | 1;
+  created_at: string | null;
+};
+
+export type OpsConflict = {
+  rin: string;
+  csv: OpsCsvSnapshot;
+  db: OpsDbSnapshot;
+};
+
+export type OpsPreview = {
+  added: OpsAddedRin[];
+  conflicts: OpsConflict[];
+  /** One human-readable reason per skipped CSV row. */
+  skipped: string[];
+};
+
+export type OpsCommit = OpsPreview & {
+  counts: {
+    added: number;
+    conflicts: number;
+    skipped: number;
+  };
+};

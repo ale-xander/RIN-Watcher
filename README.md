@@ -33,3 +33,12 @@ and requiring the `X-Admin-Token` header to match the backend's
 `ADMIN_PASSWORD`.
 
 Follow the printed 'Next steps' to push the updated DB to Fly.
+
+## The `/lemons` upload page
+
+`/lemons` is a hidden internal page for the same add-only import: unlock it with
+the shared `ADMIN_PASSWORD`, drop a CSV, review what will be added (green),
+which RINs already exist (red, DB vs CSV) and which rows were rejected (gray),
+then confirm. The browser talks to Fly through the `frontend` catch-all proxy
+`/api/ops/[...path]`, which forwards the file and the `X-Admin-Token` header, so
+`FETCH_API_URL` must be set in Vercel (the password itself never lives there).

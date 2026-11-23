@@ -103,16 +103,6 @@ export const NBT_ROW_KEYS = [
   "unbundled-ag",
 ] as const satisfies readonly NbtRowKey[];
 
-export interface HfpStrip {
-  total: number;
-  missing: number;
-  healthy: number;
-  /** HFP RINs MIDAS has no status row for: awaiting the feed, not failing. */
-  notInMidas: number;
-  never: number;
-  rag: RagLevel;
-}
-
 /**
  * Amber below 10% missing, red at or above it: 9.99% is amber, exactly 10% is
  * red. The boundary is inclusive on purpose (`>=`, never `>`).
@@ -471,25 +461,12 @@ export function buildNbtMatrix(rins: RinEntry[]): NbtMatrix {
   return { rows, colTotals, grandTotal };
 }
 
-/** HFP is a single summary strip: every `component === "hfp"` RIN. */
-export function buildHfpStrip(rins: RinEntry[]): HfpStrip {
-  const cell = cellFromRins(rins.filter((rin) => rin.component === "hfp"));
-  return {
-    total: cell.total,
-    missing: cell.missing,
-    healthy: cell.healthy,
-    notInMidas: cell.notInMidas,
-    never: cell.never,
-    rag: cell.rag,
-  };
-}
-
 // ---------------------------------------------------------------------------
 // Dev fixture
 // ---------------------------------------------------------------------------
 //
 // `__devFixture()` is a hand-checkable smoke test for the builders above: it
-// runs three synthetic payloads through them, and the expectation blocks below
+// runs the synthetic payloads below through them, and the expectation blocks
 // spell out the exact MatrixCell each bucket must produce. Nothing calls it at
 // runtime; a dev page or a console snippet can import it and `console.table`
 // the result.
@@ -728,52 +705,6 @@ function fixtureNbtRins(): RinEntry[] {
 }
 
 /*
- * Hand-computed expectations for `hfp`: total 4, missing 1, healthy 3, never 1,
- * rag red (1/4 = 25%). The bundled RIN in the array is filtered out.
- */
-function fixtureHfpRins(): RinEntry[] {
-  return [
-    // Three priced HFP RINs and one missing that was never priced.
-    fixtureRin({
-      rin: "USCA-PGPG-3801",
-      category: "other",
-      component: "hfp",
-      healthy: true,
-      lastSuccessDate: "2026-11-18",
-    }),
-    fixtureRin({
-      rin: "USCA-PGPG-3802",
-      category: "other",
-      component: "hfp",
-      healthy: true,
-      lastSuccessDate: "2026-11-18",
-    }),
-    fixtureRin({
-      rin: "USCA-PGXX-3803",
-      category: "other",
-      component: "hfp",
-      healthy: true,
-      lastSuccessDate: "2026-11-18",
-    }),
-    fixtureRin({
-      rin: "USCA-PGXX-3804",
-      category: "other",
-      component: "hfp",
-      healthy: false,
-      lastSuccessDate: null,
-    }),
-    // Not HFP: buildHfpStrip must ignore it.
-    fixtureRin({
-      rin: "USCA-PGPG-9901",
-      category: "ag",
-      component: "bundled",
-      healthy: false,
-      lastSuccessDate: null,
-    }),
-  ];
-}
-
-/*
  * Two standalone cells pinning the not_in_midas rules (m = missing, h = healthy,
  * nym = not_in_midas, t = total):
  *
@@ -826,7 +757,7 @@ function fixtureLegacyStatusRins(): RinEntry[] {
 }
 
 /**
- * Smoke-test fixture: runs the builders over the three synthetic payloads below.
+ * Smoke-test fixture: runs the builders over the synthetic payloads below.
  * Each payload documents the cells it must produce, so a dev can eyeball the
  * output of `console.table(__devFixture().main.rows)` without a live API.
  *
@@ -836,7 +767,6 @@ function fixtureLegacyStatusRins(): RinEntry[] {
 export function __devFixture(): {
   main: MainMatrix;
   nbt: NbtMatrix;
-  hfp: HfpStrip;
   allNotInMidas: MatrixCell;
   mixed: MatrixCell;
   legacy: MatrixCell;
@@ -866,7 +796,6 @@ export function __devFixture(): {
   return {
     main: buildMainMatrix(fixtureMainRins()),
     nbt: buildNbtMatrix(fixtureNbtRins()),
-    hfp: buildHfpStrip(fixtureHfpRins()),
     allNotInMidas,
     mixed,
     legacy,

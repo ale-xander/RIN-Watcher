@@ -3,9 +3,9 @@
 // A `Drill` records which matrix cell (or provider-wide view) the user opened.
 // `drillBaselineRins` resolves that cell back to the RINs the cell was built
 // from, and the helpers below turn that baseline into the list the affected
-// table renders: drop the healthy RINs, apply the clicked attribute chips, sort
-// the stalest first. Nothing here touches React, `fetch` or the DOM, so the page
-// can memoise every step and the rules stay unit-testable.
+// table renders: apply the clicked attribute chips, then sort the stalest
+// first. The table splits that list into its own status tabs. Nothing here
+// touches React, `fetch` or the DOM, so the page can memoise every step.
 
 import { classifyAttributes } from "./attribute-groups";
 import { CCA_HFP_RATE_NAME } from "./constants";
@@ -134,21 +134,6 @@ export function drillBaselineRins(rins: RinEntry[], drill: Drill): RinEntry[] {
       // segment, so the table can show it all without a matrix cell.
       return rins.filter((rin) => rin.component === drill.component);
   }
-}
-
-/**
- * The drill's affected RINs: everything that failed today's publication.
- * `not_in_midas` RINs are informational, so they only join when asked for.
- */
-export function affectedRins(
-  rins: RinEntry[],
-  showNotYetLive: boolean,
-): RinEntry[] {
-  return rins.filter(
-    (rin) =>
-      rin.status_kind === "missing" ||
-      (showNotYetLive && rin.status_kind === "not_in_midas"),
-  );
 }
 
 /** A pattern chip matches its own code and any parameterised variant. */

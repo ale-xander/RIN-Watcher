@@ -80,7 +80,7 @@ export function HealthMatrix({
         <h2 className="text-sm font-semibold text-gray-900">
           Pricing Health by Segment
         </h2>
-        {/* PG&E bundled + unbundled only; HFP has its own strip. */}
+        {/* PG&E bundled + unbundled only; HFP has its own bucket card. */}
         <MatrixHeadline cell={matrix.grandTotal} />
       </div>
 

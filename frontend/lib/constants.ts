@@ -25,8 +25,8 @@ export const COMPONENT_LABELS: Record<Component, string> = {
 
 /**
  * Rate name the CCA-owned HFP RINs carry. They are a separate feed from the
- * PG&E HFP buckets, so the HFP strip reports them as a muted sub-line instead of
- * folding them into the PG&E cell.
+ * PG&E HFP buckets, so the HFP bucket card gives them their own muted row and
+ * the HFP-wide drill leaves them out.
  */
 export const CCA_HFP_RATE_NAME = "HFP - CCA Prices";
 

@@ -64,7 +64,7 @@ export interface PatternGroup {
   patterns: PatternChip[];
 }
 
-/** PG&E components the drills break out; HFP is tracked by its own strip. */
+/** PG&E components the drills break out; HFP has its own bucket card. */
 type DrillComponent = Exclude<Component, "hfp">;
 
 const DRILL_COMPONENTS: DrillComponent[] = ["bundled", "unbundled"];

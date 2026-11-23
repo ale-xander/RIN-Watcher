@@ -10,6 +10,8 @@
 import { classifyAttributes } from "./attribute-groups";
 import { CCA_HFP_RATE_NAME } from "./constants";
 import type { NbtRowKey as NbtBodyRowKey } from "./health-matrix";
+import { hfpBucketOf } from "./hfp-buckets";
+import type { HfpBucket } from "./hfp-buckets";
 import { getVintage } from "./nbt-vintage";
 import type { NbtVintage } from "./nbt-vintage";
 import type { RinEntry } from "./types";
@@ -35,8 +37,10 @@ export type Drill =
    * below already is the HFP-wide universe.
    */
   | { kind: "component"; component: "bundled" | "unbundled" }
-  /** The HFP strip: PG&E HFP RINs, CCA-owned HFP excluded. */
+  /** The whole HFP tab: every HFP RIN, CCA-owned feeds included. */
   | { kind: "hfp" }
+  /** One feed of the HFP bucket card (bundled secondary, CCA prices, ...). */
+  | { kind: "hfp-bucket"; bucket: HfpBucket }
   /** Provider-wide list, used for providers without a component split. */
   | { kind: "provider" };
 
@@ -52,6 +56,8 @@ export function sameDrill(a: Drill, b: Drill): boolean {
       return b.kind === "nbt" && a.row === b.row && a.col === b.col;
     case "component":
       return b.kind === "component" && a.component === b.component;
+    case "hfp-bucket":
+      return b.kind === "hfp-bucket" && a.bucket === b.bucket;
     default:
       return true;
   }
@@ -82,7 +88,7 @@ function isMatrixRin(rin: RinEntry): boolean {
 /**
  * Every RIN behind a drill, before the failure filter: the "engine" of the
  * matrix cell. Uses the same rules as `buildMainMatrix` / `buildNbtMatrix` /
- * `buildHfpStrip`, so a cell's `total` and the baseline length agree.
+ * `buildHfpBuckets`, so a cell's `total` and the baseline length agree.
  */
 export function drillBaselineRins(rins: RinEntry[], drill: Drill): RinEntry[] {
   switch (drill.kind) {
@@ -92,6 +98,14 @@ export function drillBaselineRins(rins: RinEntry[], drill: Drill): RinEntry[] {
       return rins.filter(
         (rin) =>
           rin.component === "hfp" && rin.rate_name !== CCA_HFP_RATE_NAME,
+      );
+    case "hfp-bucket":
+      // One feed of the HFP bucket card. The `component === "hfp"` guard is the
+      // same one `buildHfpBuckets` applies, so this baseline and the row's cell
+      // always describe the same RINs.
+      return rins.filter(
+        (rin) =>
+          rin.component === "hfp" && hfpBucketOf(rin.rin) === drill.bucket,
       );
     case "main":
       return rins.filter(

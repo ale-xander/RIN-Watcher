@@ -1,9 +1,9 @@
 "use client";
 
 // The integrated RIN dashboard: provider tabs, the PG&E component toggle, the
-// segment x component health matrix (or, for HFP, the single summary strip that
-// replaces both matrices — HFP RINs carry no NBT codes), the NBT vintage matrix,
-// and the drill those matrices open.
+// segment x component health matrix (or, for HFP, the five-bucket health card
+// that replaces both matrices — HFP RINs carry no NBT codes), the NBT vintage
+// matrix, and the drill those matrices open.
 //
 // One rule keeps the page coherent: the matrices are always built from the
 // provider-wide payload (`?component=all`), because a matrix cell is meaningless
@@ -37,6 +37,8 @@ import {
 } from "@/lib/drill";
 import type { Drill, MainColKey, MainRowKey, NbtColKey } from "@/lib/drill";
 import type { MatrixCell } from "@/lib/health-matrix";
+import { HFP_BUCKETS } from "@/lib/hfp-buckets";
+import type { HfpBucket } from "@/lib/hfp-buckets";
 import { normalizeDashboard } from "@/lib/normalize";
 import { isNbt } from "@/lib/rin-utils";
 import type {
@@ -54,8 +56,8 @@ import { ComponentToggle } from "./component-toggle";
 import { DashboardSkeleton } from "./dashboard-skeleton";
 import { ErrorPanel } from "./error-panel";
 import { FilterPill } from "./filter-pill";
-import { HfpStrip } from "./hfp-strip";
 import { HealthMatrix } from "./health-matrix";
+import { HfpBuckets } from "./hfp-buckets";
 import { NbtMatrix } from "./nbt-matrix";
 import { PatternStrip } from "./pattern-strip";
 import { ProviderTabs } from "./provider-tabs";
@@ -194,6 +196,8 @@ function drillKeyOf(drill: Drill): string {
       return `nbt:${drill.row}:${drill.col}`;
     case "component":
       return `component:${drill.component}`;
+    case "hfp-bucket":
+      return `hfp-bucket:${drill.bucket}`;
     default:
       return drill.kind;
   }
@@ -224,6 +228,11 @@ function drillScopeLabels(drill: Drill): string[] {
       return [COL_LABELS[drill.component], "All segments"];
     case "hfp":
       return ["HFP"];
+    case "hfp-bucket":
+      return [
+        HFP_BUCKETS.find((bucket) => bucket.key === drill.bucket)?.label ??
+          drill.bucket,
+      ];
     case "provider":
       return ["All RINs"];
   }
@@ -307,8 +316,8 @@ export function Dashboard() {
   const failedRins = data?.failed_rins ?? EMPTY_RINS;
   const successfulRins = data?.successful_rins ?? EMPTY_RINS;
 
-  // Both matrices, the HFP strip and every drill read this one list, so a cell
-  // and the drill it opens can never disagree about which RINs it contains.
+  // Both matrices, the HFP bucket card and every drill read this one list, so a
+  // cell and the drill it opens can never disagree about which RINs it holds.
   const allRins = useMemo(
     () => [...failedRins, ...successfulRins],
     [failedRins, successfulRins],
@@ -491,11 +500,21 @@ export function Dashboard() {
   }
 
   /**
+   * One HFP bucket row: the drill covers exactly the RINs the row counted. It
+   * opens on the status the row is about (fixable failures first, then healthy,
+   * else the still-pending ones), and re-clicking the same row keeps whichever
+   * tab the user switched to — same rules as a matrix cell.
+   */
+  function openHfpBucketDrill(bucket: HfpBucket, cell: MatrixCell) {
+    openDrill({ kind: "hfp-bucket", bucket }, getDefaultStatus(cell));
+  }
+
+  /**
    * The Master RIN List: open the whole current component (and the active
    * category chip) at once, without picking a matrix cell. The drill is
    * provider-wide but component-scoped, and it opens on the table's "All" tab
-   * so nothing is filtered out. HFP has no segment grid, so it reuses the
-   * strip's own drill — that already is the HFP-wide universe.
+   * so nothing is filtered out. HFP has no segment grid, so it uses the
+   * HFP-wide drill — that already is the whole HFP universe.
    */
   function handleViewAllRins() {
     const next: Drill =
@@ -810,7 +829,7 @@ export function Dashboard() {
           ) : null}
 
           {/* HFP RINs have no segment, so the category chips have no meaning
-              on that tab: the strip is the whole HFP headline. */}
+              on that tab: the bucket card is the whole HFP headline. */}
           {data && !isHfp ? (
             <CategoryChips
               segments={segmentChips}
@@ -834,13 +853,11 @@ export function Dashboard() {
               {showComponentToggle ? (
                 isHfp ? (
                   // HFP RINs carry no NBT codes (verified against the API), so
-                  // the vintage matrix would be an empty panel here: the strip
-                  // is the whole HFP headline.
-                  <HfpStrip
+                  // the vintage matrix would be an empty panel here: the
+                  // five-bucket card is the whole HFP headline.
+                  <HfpBuckets
                     rins={scopedRins}
-                    onCellClick={(cell) =>
-                      openDrill({ kind: "hfp" }, getDefaultStatus(cell))
-                    }
+                    onDrillClick={openHfpBucketDrill}
                   />
                 ) : (
                   <>

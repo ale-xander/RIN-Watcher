@@ -7,4 +7,4 @@ select = ["E4", "E7", "E9", "F", "I", "UP", "B", "BLE", "TRY", "FURB", "EXE"]
 ignore = ["TRY003"]
 
 [lint.isort]
-known-first-party = ["database", "fetch_data"]
+known-first-party = ["database", "fetch_data", "scripts"]

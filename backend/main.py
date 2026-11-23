@@ -11,6 +11,11 @@ PG&E's PGPG/PGXX RINs and its HFP (Hourly Flex Pricing) RINs. ``?component=all``
 with its own ``component``.
 POST /api/admin/fetch queues a MIDAS fetch in the background; it is guarded by
 the FETCH_SECRET environment variable and returns 202 immediately.
+
+POST /api/ops/preview and POST /api/ops/commit accept the add-only RIN CSV as a
+FormData field named ``file`` and require the ADMIN_PASSWORD environment variable
+in the ``X-Admin-Token`` header. Preview runs the importer's dry run; commit
+inserts the new RINs and reports conflicts/skips.
 """
 
 from __future__ import annotations
@@ -18,6 +23,7 @@ from __future__ import annotations
 import hmac
 import json
 import os
+import sqlite3
 import sys
 from contextlib import asynccontextmanager, closing
 from datetime import datetime
@@ -26,11 +32,27 @@ from typing import IO, Annotated, Any
 
 import pytz
 from dotenv import load_dotenv
-from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Query
+from fastapi import (
+    BackgroundTasks,
+    FastAPI,
+    File,
+    Header,
+    HTTPException,
+    Query,
+    UploadFile,
+)
 from fastapi.middleware.cors import CORSMiddleware
 
 import fetch_data
 from database import BACKEND_DIR, get_connection, get_db_path, init_db
+from scripts.manage_rins import (
+    CsvFormatError,
+    apply_rows,
+    classify_rows,
+    normalize_rows,
+    read_csv_text,
+    read_stored,
+)
 
 load_dotenv(BACKEND_DIR / ".env")
 
@@ -41,6 +63,15 @@ DEFAULT_CORS_ORIGINS = "http://localhost:3000,http://127.0.0.1:3000"
 # Shared secret required by POST /api/admin/fetch. When unset the endpoint is
 # disabled (503) instead of running with an empty, guessable token.
 FETCH_SECRET = os.getenv("FETCH_SECRET", "").strip()
+
+# Ops API (/api/ops/*) authentication. The value is read per request so a
+# rotated ADMIN_PASSWORD takes effect without a restart; unset disables the
+# endpoints (503) instead of accepting an empty token.
+ADMIN_TOKEN_HEADER = "X-Admin-Token"
+
+# The whole RIN registry is ~1,300 rows, so a few MB is already generous. The
+# limit keeps a mistaken upload from filling the request buffer.
+MAX_OPS_UPLOAD_BYTES = 5 * 1024 * 1024
 
 # Tab labels rendered by the frontend. A provider code missing from this map
 # (e.g. a new CCA that shows up in the spreadsheet) still gets a tab: the code
@@ -461,3 +492,154 @@ def trigger_fetch(
         raise
 
     return {"status": "accepted", "message": "Fetch queued"}
+
+
+def _require_admin(token: str | None) -> None:
+    """Authorize an ops request by comparing ``X-Admin-Token`` to ADMIN_PASSWORD.
+
+    Mirrors ``POST /api/admin/fetch``: an unconfigured secret returns 503 (fail
+    closed) rather than accepting an empty token, and the comparison is
+    constant-time. The environment variable is read per request so a rotated
+    password does not need a restart.
+    """
+    expected = os.environ.get("ADMIN_PASSWORD", "").strip()
+    if not expected:
+        raise HTTPException(
+            status_code=503,
+            detail="ADMIN_PASSWORD is not configured on the server",
+        )
+    provided = (token or "").strip()
+    if not provided or not hmac.compare_digest(provided.encode(), expected.encode()):
+        raise HTTPException(
+            status_code=401,
+            detail=f"Invalid or missing {ADMIN_TOKEN_HEADER} header",
+        )
+
+
+async def _read_upload(file: UploadFile) -> str:
+    """Return the upload as text, rejecting oversized or non-UTF-8 files."""
+    content = await file.read()
+    if len(content) > MAX_OPS_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"CSV is larger than {MAX_OPS_UPLOAD_BYTES // (1024 * 1024)} MB",
+        )
+    try:
+        return content.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise HTTPException(
+            status_code=400, detail="CSV must be UTF-8 encoded"
+        ) from exc
+
+
+def _build_plan(
+    conn: sqlite3.Connection, text: str, name: str
+) -> tuple[list[dict], list[dict], list[str]]:
+    """Classify an uploaded CSV against the DB without writing anything.
+
+    Returns ``(ready, conflicts, skipped)`` -- the same three groups the CLI's
+    ``--dry-run`` reports. Both ops routes call this, so preview and commit can
+    never disagree about what a file means.
+    """
+    try:
+        rows, skipped = normalize_rows(read_csv_text(text, name))
+    except CsvFormatError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    ready, conflicts = classify_rows(rows, read_stored(conn))
+    return ready, conflicts, skipped
+
+
+def _added_entries(rows: list[dict]) -> list[dict[str, Any]]:
+    """JSON-safe description of the RINs an import adds (or would add)."""
+    return [
+        {
+            "rin": row["rin"],
+            "prefix": row["prefix"],
+            "provider_code": row["provider_code"],
+            "component": row["component"],
+            "tariff": row["tariff"],
+            "enrollment_codes": row["enrollment_codes"],
+            "category": row["category"],
+        }
+        for row in rows
+    ]
+
+
+def _plan_upload(text: str, name: str) -> tuple[list[dict], list[dict], list[str]]:
+    """Run the dry-run classification on a short-lived database connection."""
+    try:
+        with closing(get_connection(DB_PATH)) as conn:
+            return _build_plan(conn, text, name)
+    except sqlite3.OperationalError as exc:
+        raise HTTPException(
+            status_code=503, detail=f"Database unavailable: {exc}"
+        ) from exc
+
+
+@app.post("/api/ops/preview")
+async def preview_ops(
+    file: Annotated[
+        UploadFile,
+        File(description="CSV with RIN, Tariff, Enrollment Code and Category"),
+    ],
+    x_admin_token: Annotated[str | None, Header(alias=ADMIN_TOKEN_HEADER)] = None,
+) -> dict[str, Any]:
+    """Dry-run an add-only CSV import. Writes nothing.
+
+    ``added`` are the RINs the commit would insert, ``conflicts`` are rows whose
+    RIN already exists in the database (active or inactive), and ``skipped`` are
+    rows rejected before the DB check (bad prefix, missing category, duplicate
+    in the CSV).
+    """
+    _require_admin(x_admin_token)
+    name = file.filename or "upload.csv"
+    text = await _read_upload(file)
+    ready, conflicts, skipped = _plan_upload(text, name)
+    return {
+        "added": _added_entries(ready),
+        "conflicts": conflicts,
+        "skipped": skipped,
+    }
+
+
+@app.post("/api/ops/commit")
+async def commit_ops(
+    file: Annotated[
+        UploadFile,
+        File(description="CSV with RIN, Tariff, Enrollment Code and Category"),
+    ],
+    x_admin_token: Annotated[str | None, Header(alias=ADMIN_TOKEN_HEADER)] = None,
+) -> dict[str, Any]:
+    """Insert the CSV's new RINs, skipping conflicts and invalid rows.
+
+    Existing RINs are never updated, so running this twice with the same file
+    adds nothing the second time: every row comes back as a conflict.
+    """
+    _require_admin(x_admin_token)
+    name = file.filename or "upload.csv"
+    text = await _read_upload(file)
+    try:
+        with closing(get_connection(DB_PATH)) as conn:
+            ready, conflicts, skipped = _build_plan(conn, text, name)
+            added = apply_rows(conn, ready)
+    except sqlite3.OperationalError as exc:
+        raise HTTPException(
+            status_code=503, detail=f"Database unavailable: {exc}"
+        ) from exc
+    except sqlite3.IntegrityError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "A RIN from this CSV was inserted concurrently; run preview again."
+            ),
+        ) from exc
+    return {
+        "added": _added_entries(ready),
+        "conflicts": conflicts,
+        "skipped": skipped,
+        "counts": {
+            "added": added,
+            "conflicts": len(conflicts),
+            "skipped": len(skipped),
+        },
+    }

@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
-"""Upsert RINs from a CSV file into the RIN Watch database.
+"""Insert *new* RINs from a CSV file into the RIN Watch database.
 
-The database is the source of truth for which RINs exist; this script is an
-*additive* maintenance tool, not a mirror of the CSV:
+The database is the source of truth, so this importer is strictly add-only. A
+RIN that is already in ``rins`` -- active (``is_active = 1``) or soft-deleted
+(``is_active = 0``) -- is reported as a **Conflict** and left completely
+untouched. Editing an existing RIN is a manual Cline/terminal job, never a CSV
+import; nothing is deleted or reactivated either.
 
-* a RIN that is already in ``rins`` gets its ``tariff``, ``enrollment_codes``
-  and ``category`` overwritten from the row (and ``is_active`` set back to 1 if
-  it had been soft-deleted);
 * a RIN that is missing is inserted with the provider route derived from its
-  prefix, ``is_active = 1`` and no ``rate_name`` (MIDAS never writes one, so the
-  dashboard falls back to the tariff);
-* a RIN that is not in the CSV is left exactly as it is -- nothing is deleted
-  or soft-deleted. That is the difference from the retired ``MIDAS RIN.xlsx``
-  importer, which treated the sheet as the complete registry.
+  prefix, ``is_active = 1``, no ``rate_name`` (MIDAS never writes one, so the
+  dashboard falls back to the tariff) and ``created_at = datetime('now')``;
+* a RIN that already exists is a conflict: no column is updated;
+* a RIN that is not in the CSV is left exactly as it is.
 
 The CSV must have the columns ``RIN``, ``Tariff``, ``Enrollment Code`` and
 ``Category``; extra columns are ignored and header matching is
@@ -40,6 +39,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import io
 import json
 import shutil
 import sqlite3
@@ -47,6 +47,7 @@ import sys
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
+from typing import IO
 
 # Running ``python backend/scripts/manage_rins.py`` puts scripts/ on sys.path,
 # not backend/, so make the backend modules importable from either cwd.
@@ -103,53 +104,71 @@ def _text(value: object) -> str:
     return str(value).strip()
 
 
-def read_csv(path: Path) -> list[dict]:
-    """Read the CSV into plain dicts, one per row that has any content.
+class CsvFormatError(ValueError):
+    """The file is not a usable RIN CSV (empty, or missing a required column)."""
 
-    Header names are matched case-insensitively after stripping, and
-    ``utf-8-sig`` consumes a UTF-8 BOM, so a spreadsheet exported with a
-    slightly different header casing still imports. Values are returned
-    untouched -- stripping and validation happen in ``parse_row``. Blank lines
-    are ignored; every other row is kept so it can be warned about.
+
+def _read_records(handle: IO[str], name: str) -> list[dict]:
+    """Read CSV rows into plain dicts, one per row that has any content.
+
+    Header names are matched case-insensitively after stripping, and the caller
+    opens the file with ``utf-8-sig`` (or decodes the upload that way), so a
+    spreadsheet exported with a slightly different header casing still imports.
+    Values are returned untouched -- stripping and validation happen in
+    ``parse_row``. Blank lines are ignored; every other row is kept so it can be
+    reported. ``name`` only labels error messages.
+
+    Raises ``CsvFormatError`` (a ``ValueError``) instead of exiting so both the
+    CLI and the API can turn a bad file into their own error response.
     """
+    reader = csv.reader(handle)
+    try:
+        header = next(reader)
+    except StopIteration:
+        raise CsvFormatError(f"{name}: file is empty.") from None
+    columns = {
+        _text(value).lower(): position
+        for position, value in enumerate(header)
+        if _text(value)
+    }
+    missing = [value for value in REQUIRED_HEADERS if value.lower() not in columns]
+    if missing:
+        raise CsvFormatError(
+            f"{name}: missing required column(s): {', '.join(missing)}."
+            f" Expected headers: {', '.join(REQUIRED_HEADERS)}."
+        )
+    indexes = {value: columns[value.lower()] for value in REQUIRED_HEADERS}
+
+    def cell(row: list[str], column: str) -> str:
+        """Read ``row`` at the column position of ``column`` (short rows -> '')."""
+        position = indexes[column]
+        return row[position] if position < len(row) else ""
+
+    records: list[dict] = []
+    for row_number, row in enumerate(reader, start=2):
+        if not any(_text(value) for value in row):
+            continue
+        records.append(
+            {
+                "row": row_number,
+                "rin": cell(row, "RIN"),
+                "tariff": cell(row, "Tariff"),
+                "enrollment_raw": cell(row, "Enrollment Code"),
+                "category": cell(row, "Category"),
+            }
+        )
+    return records
+
+
+def read_csv(path: Path) -> list[dict]:
+    """Read a CSV file from disk (UTF-8, BOM tolerated)."""
     with path.open(newline="", encoding="utf-8-sig") as handle:
-        reader = csv.reader(handle)
-        try:
-            header = next(reader)
-        except StopIteration:
-            raise SystemExit(f"{path.name}: file is empty.") from None
-        columns = {
-            _text(name).lower(): position
-            for position, name in enumerate(header)
-            if _text(name)
-        }
-        missing = [name for name in REQUIRED_HEADERS if name.lower() not in columns]
-        if missing:
-            raise SystemExit(
-                f"{path.name}: missing required column(s): {', '.join(missing)}."
-                f" Expected headers: {', '.join(REQUIRED_HEADERS)}."
-            )
-        indexes = {name: columns[name.lower()] for name in REQUIRED_HEADERS}
+        return _read_records(handle, path.name)
 
-        def cell(row: list[str], name: str) -> str:
-            """Read ``row`` at the column position of ``name`` (short rows -> '')."""
-            position = indexes[name]
-            return row[position] if position < len(row) else ""
 
-        records: list[dict] = []
-        for row_number, row in enumerate(reader, start=2):
-            if not any(_text(value) for value in row):
-                continue
-            records.append(
-                {
-                    "row": row_number,
-                    "rin": cell(row, "RIN"),
-                    "tariff": cell(row, "Tariff"),
-                    "enrollment_raw": cell(row, "Enrollment Code"),
-                    "category": cell(row, "Category"),
-                }
-            )
-        return records
+def read_csv_text(text: str, name: str = "upload.csv") -> list[dict]:
+    """Parse CSV content that is already in memory (API uploads)."""
+    return _read_records(io.StringIO(text), name)
 
 
 def split_codes(raw: str) -> list[str]:
@@ -223,23 +242,23 @@ def parse_row(raw: dict) -> tuple[dict | None, str | None]:
 def normalize_rows(raw_rows: list[dict]) -> tuple[list[dict], list[str]]:
     """Normalize every row and collect one warning per skipped row."""
     rows: list[dict] = []
-    warnings: list[str] = []
+    skipped: list[str] = []
     first_row: dict[str, int] = {}
     for raw in raw_rows:
         row, warning = parse_row(raw)
         if row is None:
-            warnings.append(warning or f"row {raw['row']}: skipped")
+            skipped.append(warning or f"row {raw['row']}: skipped")
             continue
         rin = row["rin"]
         if rin in first_row:
-            warnings.append(
+            skipped.append(
                 f"row {raw['row']}: skipped, duplicate RIN {rin}"
                 f" (first seen on row {first_row[rin]})"
             )
             continue
         first_row[rin] = raw["row"]
         rows.append(row)
-    return rows, warnings
+    return rows, skipped
 
 
 def _stored_codes(value: str | None) -> list[str]:
@@ -256,7 +275,10 @@ def _stored_codes(value: str | None) -> list[str]:
 
 
 def read_stored(conn: sqlite3.Connection) -> dict[str, dict]:
-    """Read the rins table into ``{rin: {tariff, enrollment_codes, category, is_active}}``.
+    """Read the rins table into ``{rin: snapshot}`` for conflict reporting.
+
+    Both active and soft-deleted RINs are returned: the importer is add-only, so
+    ``is_active = 0`` is just as much of a conflict as ``is_active = 1``.
 
     The whole table is read instead of a ``WHERE rin IN (...)`` list: a CSV may
     hold the entire ~1,300 RIN registry, which would exceed SQLite's 999
@@ -264,78 +286,94 @@ def read_stored(conn: sqlite3.Connection) -> dict[str, dict]:
     """
     stored: dict[str, dict] = {}
     for row in conn.execute(
-        "SELECT rin, tariff, enrollment_codes, category, is_active FROM rins"
+        """
+        SELECT rin, provider_code, prefix, tariff, enrollment_codes,
+               category, is_active, created_at
+        FROM rins
+        """
     ):
         stored[row["rin"]] = {
+            "provider_code": row["provider_code"],
+            "prefix": row["prefix"],
             "tariff": row["tariff"] or None,
             "enrollment_codes": _stored_codes(row["enrollment_codes"]),
             "category": row["category"],
             "is_active": row["is_active"],
+            "created_at": row["created_at"],
         }
     return stored
 
 
-def diff_against_db(conn: sqlite3.Connection, rows: list[dict]) -> dict[str, list[str]]:
-    """Classify the file's RINs against the database.
-
-    Only the three columns this importer owns are compared, so a re-run of the
-    same file reports everything as unchanged even if the row's provider route
-    or prefix differs from what is stored (neither is written for an existing
-    RIN). ``reactivated`` wins over ``updated``: bringing a soft-deleted RIN
-    back is the interesting fact, and its fields are refreshed at the same time.
-    """
-    stored = read_stored(conn)
-    diff: dict[str, list[str]] = {
-        "added": [],
-        "updated": [],
-        "reactivated": [],
-        "unchanged": [],
+def csv_snapshot(row: dict) -> dict:
+    """The CSV-owned fields of a planned row, JSON-safe (used in conflicts)."""
+    return {
+        "tariff": row["tariff"],
+        "enrollment_codes": row["enrollment_codes"],
+        "category": row["category"],
     }
+
+
+def db_snapshot(stored: dict) -> dict:
+    """The stored fields worth showing next to a conflicting CSV row."""
+    return {
+        "tariff": stored["tariff"],
+        "enrollment_codes": stored["enrollment_codes"],
+        "category": stored["category"],
+        "is_active": stored["is_active"],
+        "created_at": stored["created_at"],
+    }
+
+
+def classify_rows(
+    rows: list[dict], stored: dict[str, dict]
+) -> tuple[list[dict], list[dict]]:
+    """Split the file's rows into ``(ready_to_add, conflicts)``.
+
+    A RIN that exists in ``stored`` is a conflict whether it is active or
+    soft-deleted: this importer never updates, reactivates or deletes a row, so
+    the database keeps whatever it already has. Each conflict carries the stored
+    (``db``) and CSV (``csv``) snapshots, which the CLI prints and the ops API
+    returns as JSON.
+    """
+    ready: list[dict] = []
+    conflicts: list[dict] = []
     for row in rows:
         current = stored.get(row["rin"])
         if current is None:
-            diff["added"].append(row["rin"])
-        elif not current["is_active"]:
-            diff["reactivated"].append(row["rin"])
-        elif (
-            current["tariff"] != row["tariff"]
-            or current["enrollment_codes"] != row["enrollment_codes"]
-            or current["category"] != row["category"]
-        ):
-            diff["updated"].append(row["rin"])
+            ready.append(row)
         else:
-            diff["unchanged"].append(row["rin"])
-    return diff
+            conflicts.append(
+                {
+                    "rin": row["rin"],
+                    "csv": csv_snapshot(row),
+                    "db": db_snapshot(current),
+                }
+            )
+    return ready, conflicts
 
 
-def apply_rows(
-    conn: sqlite3.Connection, rows: list[dict], diff: dict[str, list[str]]
-) -> None:
-    """Insert, update and reactivate the classified rows in one transaction.
+def apply_rows(conn: sqlite3.Connection, rows: list[dict]) -> int:
+    """Insert ``rows`` as new RINs and return how many were written.
 
-    Existing RINs get exactly the CSV-owned columns (``tariff``,
-    ``enrollment_codes``, ``category``) plus ``is_active = 1``. Their
-    ``provider_code``, ``prefix`` and ``rate_name`` are left alone: the route is
-    only needed to create a row, and ``rate_name`` may carry the fetched MIDAS
-    or HFP bucket name. New RINs are inserted with the routed provider and
-    prefix, ``rate_name`` NULL and ``is_active = 1``.
-
-    No row outside the file is touched, and an error rolls the whole batch back
-    so the database is never left half-imported.
+    Every row here is new by construction (``classify_rows`` diverts existing
+    RINs to conflicts). ``created_at`` is the UTC import time. New RINs get the
+    routed provider and prefix, ``rate_name`` NULL and ``is_active = 1``; no
+    existing row is touched. One transaction, so a failure rolls the batch back
+    and the database is never left half-imported.
     """
-    by_rin = {row["rin"]: row for row in rows}
+    if not rows:
+        return 0
     conn.execute("BEGIN")
     try:
-        for rin in diff["added"]:
-            row = by_rin[rin]
-            conn.execute(
-                """
-                INSERT INTO rins (
-                    rin, provider_code, rate_name, tariff, enrollment_codes,
-                    category, prefix, is_active
-                )
-                VALUES (?, ?, NULL, ?, ?, ?, ?, 1)
-                """,
+        conn.executemany(
+            """
+            INSERT INTO rins (
+                rin, provider_code, rate_name, tariff, enrollment_codes,
+                category, prefix, is_active, created_at
+            )
+            VALUES (?, ?, NULL, ?, ?, ?, ?, 1, datetime('now'))
+            """,
+            [
                 (
                     row["rin"],
                     row["provider_code"],
@@ -343,67 +381,84 @@ def apply_rows(
                     row["enrollment_json"],
                     row["category"],
                     row["prefix"],
-                ),
-            )
-        for rin in (*diff["updated"], *diff["reactivated"]):
-            row = by_rin[rin]
-            conn.execute(
-                """
-                UPDATE rins
-                   SET tariff = ?, enrollment_codes = ?, category = ?,
-                       is_active = 1
-                 WHERE rin = ?
-                """,
-                (
-                    row["tariff"],
-                    row["enrollment_json"],
-                    row["category"],
-                    row["rin"],
-                ),
-            )
+                )
+                for row in rows
+            ],
+        )
         conn.execute("COMMIT")
     except Exception:  # noqa: BLE001 - roll back on anything, then re-raise
         conn.execute("ROLLBACK")
         raise
+    return len(rows)
 
 
 def _line(label: str, count: int) -> str:
     return f"{label:<{LABEL_WIDTH}}{count:>{COUNT_WIDTH}}"
 
 
+def _fmt_codes(codes: list[str]) -> str:
+    """Enrollment codes for the report: ``CARE, PGE-FS`` or ``(none)``."""
+    return ", ".join(codes) if codes else "(none)"
+
+
+def print_conflicts(conflicts: list[dict]) -> None:
+    """List each conflicting RIN with its stored data next to the CSV data."""
+    print(f"Conflicts ({len(conflicts)}):")
+    if not conflicts:
+        print("  (none)")
+        return
+    for conflict in conflicts:
+        db = conflict["db"]
+        csv_row = conflict["csv"]
+        state = "active" if db["is_active"] else "inactive"
+        print(f"  {conflict['rin']} (already in DB, {state})")
+        print(
+            f"    DB : tariff={db['tariff'] or '(none)'}"
+            f"  category={db['category']}"
+            f"  enrollment={_fmt_codes(db['enrollment_codes'])}"
+            f"  created_at={db['created_at'] or '(none)'}"
+        )
+        print(
+            f"    CSV: tariff={csv_row['tariff'] or '(none)'}"
+            f"  category={csv_row['category']}"
+            f"  enrollment={_fmt_codes(csv_row['enrollment_codes'])}"
+        )
+
+
 def print_report(
-    csv_path: Path,
+    csv_name: str,
     db_path: Path,
-    rows: list[dict],
-    diff: dict[str, list[str]],
-    warnings: list[str],
+    ready: list[dict],
+    conflicts: list[dict],
+    skipped: list[str],
 ) -> None:
-    """Print the import plan and one warning line per skipped row."""
-    counts = {key: len(value) for key, value in diff.items()}
-    print(f"Import plan for: {csv_path.name}")
+    """Print the add-only plan: what is ready, what conflicts, what was skipped."""
+    print(f"Import plan for: {csv_name}")
     print(f"Database: {db_path}")
-    if rows:
-        components = Counter(row["component"] for row in rows)
+    if ready:
+        components = Counter(row["component"] for row in ready)
         breakdown = "  ".join(
             f"{name}={components[name]}"
             for name in COMPONENT_ORDER
             if components.get(name)
         )
-        print(f"Components: {breakdown}")
-    print(_line("Added:", counts["added"]))
-    print(_line("Updated:", counts["updated"]))
-    print(_line("Reactivated:", counts["reactivated"]))
-    print(_line("Skipped:", len(warnings)))
-    print(_line("Unchanged:", counts["unchanged"]))
+        if breakdown:
+            print(f"Components: {breakdown}")
+    print(_line("Ready to Add:", len(ready)))
+    print(_line("Conflicts:", len(conflicts)))
+    print(_line("Skipped:", len(skipped)))
     print(SEPARATOR)
 
-    print(f"Warnings ({len(warnings)}):")
-    if not warnings:
+    print_conflicts(conflicts)
+    print(SEPARATOR)
+
+    print(f"Skipped ({len(skipped)}):")
+    if not skipped:
         print("  (none)")
-    for message in warnings[:MAX_WARNINGS]:
+    for message in skipped[:MAX_WARNINGS]:
         print(f"  {message}")
-    if len(warnings) > MAX_WARNINGS:
-        print(f"  ... and {len(warnings) - MAX_WARNINGS} more.")
+    if len(skipped) > MAX_WARNINGS:
+        print(f"  ... and {len(skipped) - MAX_WARNINGS} more.")
 
 
 def print_next_steps(db_path: Path) -> None:
@@ -429,8 +484,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python manage_rins.py",
         description=(
-            "Upsert RINs from a CSV file. The importer is additive: RINs that"
-            " are not in the file are never deleted or soft-deleted."
+            "Insert new RINs from a CSV file. The importer is add-only: a RIN"
+            " that already exists in the database (active or inactive) is"
+            " reported as a conflict and never updated."
         ),
     )
     parser.add_argument("csv_path", type=Path, help="path to the CSV file")
@@ -442,7 +498,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="parse and diff only: no writes, no backup",
+        help="print Ready to Add / Conflicts / Skipped only: no writes, no backup",
     )
     parser.add_argument(
         "--no-backup",
@@ -459,8 +515,11 @@ def main(argv: list[str] | None = None) -> int:
     if not csv_path.is_file():
         raise SystemExit(f"CSV not found: {csv_path}")
 
-    raw_rows = read_csv(csv_path)
-    rows, warnings = normalize_rows(raw_rows)
+    try:
+        raw_rows = read_csv(csv_path)
+    except CsvFormatError as exc:
+        raise SystemExit(str(exc)) from exc
+    rows, skipped = normalize_rows(raw_rows)
 
     db_path = get_db_path(args.db)
     if not db_path.is_file():
@@ -471,26 +530,28 @@ def main(argv: list[str] | None = None) -> int:
     conn = get_connection(db_path)
     try:
         try:
-            diff = diff_against_db(conn, rows)
+            ready, conflicts = classify_rows(rows, read_stored(conn))
         except sqlite3.OperationalError as exc:
             raise SystemExit(
                 f"{db_path} is not an initialized RIN Watch database ({exc})."
                 " Run `python database.py` first."
             ) from exc
 
-        print_report(csv_path, db_path, rows, diff, warnings)
+        print_report(csv_path.name, db_path, ready, conflicts, skipped)
         if args.dry_run:
             print("DRY RUN — no changes written.")
         else:
             if not args.no_backup:
                 print(f"Backup written to: {backup_database(db_path)}")
-            apply_rows(conn, rows, diff)
-            counts = {key: len(value) for key, value in diff.items()}
+            try:
+                added = apply_rows(conn, ready)
+            except sqlite3.Error as exc:
+                # apply_rows rolls the batch back, so the DB is unchanged.
+                raise SystemExit(f"Import failed, nothing committed: {exc}") from exc
             print(
-                f"Committed: +{counts['added']} added,"
-                f" ~{counts['updated']} updated,"
-                f" ^{counts['reactivated']} reactivated,"
-                f" {len(warnings)} skipped"
+                f"Committed: {added} added,"
+                f" {len(conflicts)} conflicts skipped,"
+                f" {len(skipped)} skipped"
             )
         print_next_steps(db_path)
     finally:

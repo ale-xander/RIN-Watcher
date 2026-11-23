@@ -5,7 +5,9 @@ RIN_WATCH_DB environment variable to store it somewhere else.
 
 Run ``python database.py`` to create/refresh the schema. New columns are defined
 in ``MIGRATIONS`` rather than in ``SCHEMA`` so that databases created before the
-column existed pick it up too; ``init_db`` applies them idempotently.
+column existed pick it up too; ``init_db`` applies them idempotently. The
+``created_at`` column additionally gets a one-off backfill (see
+``backfill_created_at``) so pre-existing RINs are dated instead of left NULL.
 """
 
 from __future__ import annotations
@@ -93,6 +95,10 @@ MIGRATIONS = (
         "ALTER TABLE rins ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1 "
         "CHECK (is_active IN (0, 1))",
     ),
+    # UTC timestamp of the import that added the RIN. Written once, on insert:
+    # it is the audit trail for the add-only CSV importer, so no code path
+    # updates it afterwards. Pre-existing rows are backfilled by init_db.
+    ("rins", "created_at", "ALTER TABLE rins ADD COLUMN created_at TEXT"),
 )
 
 DbPath = str | Path | None
@@ -144,6 +150,9 @@ def init_db(db_path: DbPath = None) -> Path:
         added = apply_migrations(conn)
         if added:
             print(f"Applied {len(added)} schema migration(s): {', '.join(added)}")
+        backfilled = backfill_created_at(conn)
+        if backfilled:
+            print(f"Backfilled created_at for {backfilled} RIN(s) with today's date")
         conn.executemany(
             "INSERT OR IGNORE INTO providers (code, display_name) VALUES (?, ?)",
             PROVIDERS,
@@ -183,6 +192,23 @@ def apply_migrations(
         columns.add(column)
         added.append(f"{table}.{column}")
     return added
+
+
+def backfill_created_at(conn: sqlite3.Connection) -> int:
+    """One-off ``created_at`` migration: date every RIN that has no timestamp.
+
+    Databases created before the column existed get NULL for all their RINs
+    after ``apply_migrations`` adds it. Stamping them with today's date keeps
+    the column usable for reports instead of leaving a hole in the history.
+    ``date('now')`` is SQLite's UTC date, consistent with the UTC
+    ``datetime('now')`` the importer writes for new rows.
+
+    The ``IS NULL`` filter makes this safe on every startup: a real import
+    timestamp is never overwritten. Returns the number of rows backfilled.
+    """
+    return conn.execute(
+        "UPDATE rins SET created_at = date('now') WHERE created_at IS NULL"
+    ).rowcount
 
 
 def upsert_provider(conn: sqlite3.Connection, code: str, display_name: str) -> None:
@@ -285,14 +311,20 @@ def upsert_rin(
     soft-deleted RIN, which is what we want when a RIN reappears in a new
     spreadsheet. Soft deletion is the importer's job, done with an explicit
     ``is_active=0``.
+
+    ``created_at`` is stamped with the UTC insert time and is deliberately not
+    part of the ``DO UPDATE`` branch: once a RIN exists, its creation date is
+    history. Note that the add-only CSV importer (``scripts/manage_rins.py``)
+    inserts rows directly instead of going through this helper.
     """
     conn.execute(
         """
         INSERT INTO rins (
             rin, provider_code, rate_name, tariff, enrollment_codes,
-            category, prefix, is_active
+            category, prefix, is_active, created_at
         )
-        VALUES (?1, ?2, ?3, ?4, ?5, COALESCE(?6, 'other'), COALESCE(?7, ''), ?8)
+        VALUES (?1, ?2, ?3, ?4, ?5, COALESCE(?6, 'other'), COALESCE(?7, ''), ?8,
+                datetime('now'))
         ON CONFLICT (rin) DO UPDATE SET
             provider_code = excluded.provider_code,
             rate_name = COALESCE(NULLIF(excluded.rate_name, ''), rins.rate_name),

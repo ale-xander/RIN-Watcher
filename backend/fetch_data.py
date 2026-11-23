@@ -8,12 +8,13 @@ entries whose ``RateID`` starts with a watched prefix are kept — PG&E's
 (``USCA-XXMB``, ``USCA-XXSJ``, ``USCA-XXPC``, ...). Test RINs (``RateID`` ending
 in ``-TEST``) are dropped: the ``-0000`` variants carry the real values.
 
-The importer (``scripts/import_rins.py``) owns the RIN registry. This script
+The importer (``scripts/manage_rins.py``) owns the RIN registry. This script
 never registers a RIN: it reads prices only for RINs the importer created and
 left active, and reports the rest as ``unknown`` (not in the database yet) or
-``inactive`` (soft-deleted by an import that dropped them). Without that guard a
-fetch would resurrect every RIN MIDAS still lists -- including HFP RINs that were
-removed from the HFP sheet -- and the active count would grow on every run.
+``inactive``. The importer is additive -- it never deletes or soft-deletes a
+RIN -- so a row is only ``inactive`` if an older import dropped it. Without
+that guard a fetch would resurrect every RIN MIDAS still lists and the active
+count would grow on every run.
 
 For each such RIN the script records whether it published at least one non-null
 value for today (America/Los_Angeles) in the ``status`` table. Test RINs

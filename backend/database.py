@@ -8,6 +8,11 @@ in ``MIGRATIONS`` rather than in ``SCHEMA`` so that databases created before the
 column existed pick it up too; ``init_db`` applies them idempotently. The
 ``created_at`` column additionally gets a one-off backfill (see
 ``backfill_created_at``) so pre-existing RINs are dated instead of left NULL.
+
+New *tables* live in ``SCHEMA`` as ``CREATE TABLE IF NOT EXISTS``. ``init_db``
+runs the whole script on every start, so that statement is itself the migration
+for files created before the table existed -- ``status_history`` is added this
+way (see ``record_status_snapshot``).
 """
 
 from __future__ import annotations
@@ -64,6 +69,21 @@ CREATE TABLE IF NOT EXISTS status (
     last_success_date TEXT,
     fetched_at        TEXT NOT NULL
 );
+
+-- One row per RIN per fetch, written *before* a fetch overwrites ``status``
+-- (see ``record_status_snapshot``). Deliberately no foreign key to ``rins``:
+-- the point of the table is a permanent record, so history has to survive the
+-- deletion of a RIN. ``status`` only keeps today, this keeps every past fetch
+-- so /api/regressions can diff the two newest snapshots.
+CREATE TABLE IF NOT EXISTS status_history (
+    rin        TEXT NOT NULL,
+    fetched_at TEXT NOT NULL,
+    has_value  INTEGER NOT NULL DEFAULT 0 CHECK (has_value IN (0, 1)),
+    PRIMARY KEY (rin, fetched_at)
+);
+
+CREATE INDEX IF NOT EXISTS idx_status_history_fetched_at
+    ON status_history (fetched_at);
 """
 
 # Columns added after the first release. ``SCHEMA`` only creates missing tables,
@@ -397,6 +417,52 @@ def save_status(
         """,
         (rin, 1 if has_value_today else 0, success_date, fetched_at),
     )
+
+
+def record_status_snapshot(conn: sqlite3.Connection) -> int:
+    """Copy the current ``status`` table into ``status_history``.
+
+    ``fetch_data.process`` calls this *before* it writes any new status, so one
+    ``fetched_at`` group holds exactly what the database looked like when a
+    fetch started. Diffing the two newest groups is what ``/api/regressions``
+    reports (see ``latest_snapshot_times``).
+
+    ``fetched_at`` is SQLite's UTC ``datetime('now')`` (``YYYY-MM-DD HH:MM:SS``),
+    which sorts lexicographically in chronological order -- that is what the
+    window query relies on. The ``(rin, fetched_at)`` primary key makes a
+    re-run inside the same second idempotent: ``OR REPLACE`` writes the same
+    values again instead of failing.
+
+    Returns the number of history rows written (0 until a fetch has recorded
+    at least one status row).
+    """
+    return conn.execute(
+        """
+        INSERT OR REPLACE INTO status_history (rin, fetched_at, has_value)
+        SELECT rin, datetime('now'), has_value_today FROM status
+        """
+    ).rowcount
+
+
+def latest_snapshot_times(conn: sqlite3.Connection, limit: int = 2) -> list[str]:
+    """The newest distinct ``status_history.fetched_at`` values, newest first.
+
+    ``limit=2`` is the regression window: ``[0]`` is the newer snapshot and
+    ``[1]`` the older one. Returns fewer entries when the history is shorter,
+    and an empty list while no fetch has been snapshotted yet.
+    """
+    return [
+        row[0]
+        for row in conn.execute(
+            """
+            SELECT DISTINCT fetched_at
+            FROM status_history
+            ORDER BY fetched_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+    ]
 
 
 if __name__ == "__main__":

@@ -17,9 +17,12 @@ that guard a fetch would resurrect every RIN MIDAS still lists and the active
 count would grow on every run.
 
 For each such RIN the script records whether it published at least one non-null
-value for today (America/Los_Angeles) in the ``status`` table. Test RINs
-(``-TEST``) already in the database are deleted on every run, with their
-``status`` rows; real RINs that dropped out of the list are kept.
+value for today (America/Los_Angeles) in the ``status`` table. Before anything
+is fetched, the current ``status`` table is copied into ``status_history``
+(see :func:`snapshot_status`), so every past fetch stays available and
+``GET /api/regressions`` can report what changed. Test RINs (``-TEST``) already
+in the database are deleted on every run, with their ``status`` rows; real RINs
+that dropped out of the list are kept.
 
 Usage:
     python fetch_data.py [--db /path/to/rin_watch.db]
@@ -60,6 +63,7 @@ from database import (
     get_db_path,
     get_fetch_lock_path,
     init_db,
+    record_status_snapshot,
     save_status,
 )
 
@@ -304,6 +308,31 @@ def fetch_rin_list(session: requests.Session) -> list[tuple[str, str]]:
     return rin_entries(payload)
 
 
+def snapshot_status(db_path: Path | None = None) -> int:
+    """Record the pre-fetch ``status`` table in ``status_history``.
+
+    The regression banner diffs the two newest snapshots, so one has to exist
+    *before* the fetch overwrites ``status``: this runs at the very start of
+    :func:`process`, before the RIN list or any rate is requested. The API's
+    background job goes through ``process`` too, so every fetch -- CLI or
+    ``POST /api/admin/fetch`` -- is captured exactly once.
+
+    ``init_db`` comes first so a database created before ``status_history``
+    existed gets the table; the snapshot itself is taken on a short-lived
+    connection that is committed before any fetch work starts. Returns the
+    number of history rows written (0 on a database with no status yet).
+    """
+    db_file = init_db(db_path)
+    with closing(get_connection(db_path)) as conn:
+        saved = record_status_snapshot(conn)
+        conn.commit()
+    print(
+        f"Snapshot: recorded {saved} status row(s) in status_history ({db_file})",
+        flush=True,
+    )
+    return saved
+
+
 def process(db_path: Path | None = None, lock: IO[str] | None = None) -> int:
     """Fetch the RIN list, then read realtime values for the registered ones.
 
@@ -320,6 +349,10 @@ def process(db_path: Path | None = None, lock: IO[str] | None = None) -> int:
     if handle is None:
         handle = acquire_fetch_lock(db_path)
     try:
+        # Before the network is touched, pin what the database looks like right
+        # now: the fetch below overwrites it, and /api/regressions diffs that
+        # snapshot against the previous one.
+        snapshot_status(db_path)
         return _process_locked(db_path)
     finally:
         if lock is None:

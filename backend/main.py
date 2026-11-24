@@ -12,6 +12,10 @@ with its own ``component``.
 POST /api/admin/fetch queues a MIDAS fetch in the background; it is guarded by
 the FETCH_SECRET environment variable and returns 202 immediately.
 
+GET /api/regressions compares the two newest ``status_history`` snapshots --
+``fetch_data.process`` writes one before each fetch -- and reports the RINs
+that lost a value (regressions) and the ones that gained one (recoveries).
+
 POST /api/ops/preview and POST /api/ops/commit accept the add-only RIN CSV as a
 FormData field named ``file`` and require the ADMIN_PASSWORD environment variable
 in the ``X-Admin-Token`` header. Preview runs the importer's dry run; commit
@@ -44,7 +48,13 @@ from fastapi import (
 from fastapi.middleware.cors import CORSMiddleware
 
 import fetch_data
-from database import BACKEND_DIR, get_connection, get_db_path, init_db
+from database import (
+    BACKEND_DIR,
+    get_connection,
+    get_db_path,
+    init_db,
+    latest_snapshot_times,
+)
 from scripts.manage_rins import (
     CsvFormatError,
     apply_rows,
@@ -434,6 +444,71 @@ def get_dashboard(
         "failed_count": len(failures),
         "failed_rins": [_rin_entry(row) for row in failures],
         "successful_rins": [_rin_entry(row) for row in successes],
+    }
+
+
+@app.get("/api/regressions")
+def get_regressions() -> dict[str, Any]:
+    """RINs that changed between the last two recorded fetches.
+
+    ``fetch_data.process`` copies ``status`` into ``status_history`` before
+    every fetch, so the two newest ``fetched_at`` groups bracket one fetch:
+    ``window_start`` is what the older snapshot saw and ``window_end`` what the
+    newer one saw (the state the current fetch started from). A *regression* had
+    a value at ``window_start`` and has none at ``window_end``; a *recovery* is
+    the reverse.
+
+    Only RINs present in both snapshots are compared, which is what the gap
+    model means by "had a value / is missing": a RIN deleted from ``rins``
+    (and therefore from ``status``) is neither. Both lists are plain RIN
+    strings -- the historical snapshots do not carry rate names or dates, and
+    joining ``rins`` would misreport deleted RINs -- and sorted for a stable
+    banner. ``has_data`` is false, with a ``null`` window, until two snapshots
+    exist.
+    """
+    with closing(get_connection(DB_PATH)) as conn:
+        times = latest_snapshot_times(conn, limit=2)
+        if len(times) < 2:
+            return {
+                "has_data": False,
+                "window_start": None,
+                "window_end": None,
+                "regressions": [],
+                "recoveries": [],
+            }
+
+        # times is newest first: [0] is the newer snapshot, [1] the older one.
+        window_end, window_start = times[0], times[1]
+        rows = conn.execute(
+            """
+            SELECT prev.rin AS rin,
+                   prev.has_value AS has_value_before,
+                   curr.has_value AS has_value_after
+            FROM status_history AS prev
+            JOIN status_history AS curr ON curr.rin = prev.rin
+            WHERE prev.fetched_at = ?
+              AND curr.fetched_at = ?
+            ORDER BY prev.rin
+            """,
+            (window_start, window_end),
+        ).fetchall()
+
+    regressions = [
+        row["rin"]
+        for row in rows
+        if row["has_value_before"] == 1 and row["has_value_after"] == 0
+    ]
+    recoveries = [
+        row["rin"]
+        for row in rows
+        if row["has_value_before"] == 0 and row["has_value_after"] == 1
+    ]
+    return {
+        "has_data": True,
+        "window_start": window_start,
+        "window_end": window_end,
+        "regressions": regressions,
+        "recoveries": recoveries,
     }
 
 

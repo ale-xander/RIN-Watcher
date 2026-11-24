@@ -126,10 +126,13 @@ export const NBT_ROW_KEYS = [
 ] as const satisfies readonly NbtRowKey[];
 
 /**
- * Amber below 10% missing, red at or above it: 9.99% is amber, exactly 10% is
+ * Amber below 25% missing, red at or above it: 24.99% is amber, exactly 25% is
  * red. The boundary is inclusive on purpose (`>=`, never `>`).
+ *
+ * The cut-off is 25%, not 10%: real missing rates sit at 12-18%, so a 10% line
+ * turned every live cell red and amber was never reached.
  */
-const RED_MISSING_RATIO = 0.1;
+const RED_MISSING_RATIO = 0.25;
 
 /**
  * Traffic light for a (missing, actionableTotal) pair. `actionableTotal` 0 is
@@ -494,7 +497,7 @@ export function buildNbtMatrix(rins: RinEntry[]): NbtMatrix {
 // the result.
 //
 // The amber/red cells deliberately hold 20 RINs so the boundaries can be hit
-// exactly: 1/20 = 5% (amber), 5/20 = 25% (red) and 1/10 = 10% (red).
+// exactly: 1/20 = 5% (amber), 5/20 = 25% (red) and 1/10 = 10% (amber).
 
 const RIN_PREFIX: Record<MatrixComponent, string> = {
   bundled: "PGPG",
@@ -625,11 +628,11 @@ function fixtureNbtRin(
  * n = never):
  *
  *                     bundled            unbundled           all
- *   ag             m1 h19 t20 n1 amber  m1 h9  t10 n0 red  m2 h28 t30 n1 amber
- *   non_res        m5 h15 t20 n2 red    m0 h0  t0  n0 empty m5 h15 t20 n2 red
- *   resid          m0 h5  t5  n0 green  m0 h4  t4  n0 green m0 h9  t9  n0 green
- *   colTotals      m6 h39 t45 n3 red    m1 h13 t14 n0 amber m7 h52 t59 n3 red
- *   grandTotal     m7 h52 t59 n3 red
+ *   ag             m1 h19 t20 n1 amber  m1 h9  t10 n0 amber  m2 h28 t30 n1 amber
+ *   non_res        m5 h15 t20 n2 red    m0 h0  t0  n0 empty  m5 h15 t20 n2 red
+ *   resid          m0 h5  t5  n0 green  m0 h4  t4  n0 green  m0 h9  t9  n0 green
+ *   colTotals      m6 h39 t45 n3 amber  m1 h13 t14 n0 amber  m7 h52 t59 n3 amber
+ *   grandTotal     m7 h52 t59 n3 amber
  *
  * Reconciliation: 45 + 14 = 59 (components), 30 + 20 + 9 = 59 (rows).
  */
@@ -660,7 +663,8 @@ function fixtureMainRins(): RinEntry[] {
       component: "bundled",
       healthy: 5,
     }),
-    // unbundled/ag: 9 priced + 1 missing that was priced before -> exactly 10%.
+    // unbundled/ag: 9 priced + 1 missing that was priced before -> exactly 10%,
+    // which is amber under the 25% cut-off.
     ...fixtureCell({
       tag: "UAG",
       category: "ag",

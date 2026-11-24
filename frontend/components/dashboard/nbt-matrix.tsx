@@ -1,15 +1,22 @@
 // 6x7 NBT pricing-health matrix: segment/component row x NBT vintage column,
 // plus the row/column totals. Pure presentation over `buildNbtMatrix`; the
 // parent owns whichever cell is selected and decides what a click drills into.
+//
+// The parent also passes the active category chip. A segment chip scopes the
+// payload to that segment, so only its two rows (bundled + unbundled) render:
+// the other segments were filtered out and would print nothing but `—` dashes.
+// The vintage columns and their dashes are untouched — a dash under 2023 still
+// means "0 RINs of this vintage exist", which is the signal worth keeping.
 
 import {
   NBT_ROW_KEYS,
   NBT_VINTAGES,
   buildNbtMatrix,
+  segmentForCategory,
 } from "@/lib/health-matrix";
 import type { MatrixCell, NbtRowKey as NbtBodyRowKey } from "@/lib/health-matrix";
 import type { NbtVintage } from "@/lib/nbt-vintage";
-import type { RinEntry } from "@/lib/types";
+import type { CategoryFilter, RinEntry } from "@/lib/types";
 
 import { MatrixCellView, MatrixHeadline } from "./matrix-cell";
 
@@ -61,14 +68,26 @@ const ROW_LABEL_CLASS =
 
 export function NbtMatrix({
   rins,
+  activeCategory = "all",
   onCellClick,
   selected,
 }: {
   rins: RinEntry[];
+  /** Active category chip; a segment keeps only that segment's rows. */
+  activeCategory?: CategoryFilter;
   onCellClick?: (cell: MatrixCell, sel: NbtMatrixSelection) => void;
   selected?: NbtMatrixSelection | null;
 }) {
   const matrix = buildNbtMatrix(rins);
+
+  // Row keys are `<component>-<segment>` and neither part contains a dash, so a
+  // matching suffix is the segment. The `All NBT` footer and the vintage
+  // columns keep rendering either way.
+  const segment = segmentForCategory(activeCategory);
+  const bodyRows =
+    segment === null
+      ? BODY_ROWS
+      : BODY_ROWS.filter((row) => row.key.endsWith(`-${segment}`));
 
   // `all` on either axis reads from the pre-computed totals.
   function cellFor(row: NbtRowKey, col: NbtColKey): MatrixCell {
@@ -124,7 +143,7 @@ export function NbtMatrix({
           </thead>
 
           <tbody>
-            {BODY_ROWS.map((row) => (
+            {bodyRows.map((row) => (
               <tr key={row.key} className="border-b border-gray-100">
                 <th scope="row" className={ROW_LABEL_CLASS}>
                   {row.label}

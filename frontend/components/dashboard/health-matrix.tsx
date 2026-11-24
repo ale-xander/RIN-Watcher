@@ -1,10 +1,16 @@
 // 3x3 pricing-health matrix: segment x PG&E component, plus the row/column
 // totals. Pure presentation over `buildMainMatrix`; the parent owns whichever
 // cell is selected and decides what a click drills into.
+//
+// The parent also passes the active category chip. A segment chip scopes the
+// payload to that segment, so rendering the other rows would fill them with
+// `—` dashes that read as "missing data" instead of "filtered out": those rows
+// are not rendered at all. A dash inside a rendered row still means "0 RINs in
+// this bucket", which is exactly what a missing NBT vintage is.
 
-import { buildMainMatrix } from "@/lib/health-matrix";
+import { buildMainMatrix, segmentForCategory } from "@/lib/health-matrix";
 import type { MatrixCell } from "@/lib/health-matrix";
-import type { RinEntry } from "@/lib/types";
+import type { CategoryFilter, RinEntry } from "@/lib/types";
 
 import { MatrixCellView, MatrixHeadline } from "./matrix-cell";
 
@@ -36,14 +42,25 @@ const ROW_LABEL_CLASS =
 
 export function HealthMatrix({
   rins,
+  activeCategory = "all",
   onCellClick,
   selected,
 }: {
   rins: RinEntry[];
+  /** Active category chip; a segment hides the other segment rows. */
+  activeCategory?: CategoryFilter;
   onCellClick?: (cell: MatrixCell, sel: MainMatrixSelection) => void;
   selected?: MainMatrixSelection | null;
 }) {
   const matrix = buildMainMatrix(rins);
+
+  // Only the chip's own segment renders; the totals row and every column stay,
+  // so the "All segments" figures still reconcile with the row above them.
+  const segment = segmentForCategory(activeCategory);
+  const segmentRows =
+    segment === null
+      ? SEGMENT_ROWS
+      : SEGMENT_ROWS.filter((row) => row.key === segment);
 
   // `all` on either axis reads from the pre-computed totals.
   function cellFor(row: MainRowKey, col: MainColKey): MatrixCell {
@@ -100,7 +117,7 @@ export function HealthMatrix({
           </thead>
 
           <tbody>
-            {SEGMENT_ROWS.map((row) => (
+            {segmentRows.map((row) => (
               <tr key={row.key} className="border-b border-gray-100">
                 <th scope="row" className={ROW_LABEL_CLASS}>
                   {row.label}

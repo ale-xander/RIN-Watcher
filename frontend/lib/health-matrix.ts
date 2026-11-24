@@ -16,7 +16,7 @@
 
 import { getVintage } from "./nbt-vintage";
 import type { NbtVintage } from "./nbt-vintage";
-import type { Component, RinEntry } from "./types";
+import type { CategoryFilter, Component, RinEntry } from "./types";
 
 /** Traffic-light classification of a MatrixCell. */
 export type RagLevel = "green" | "amber" | "red" | "empty";
@@ -42,6 +42,27 @@ export interface MatrixCell {
 /** Segments the main matrix breaks out; `other` RINs are not part of it. */
 export const SEGMENT_KEYS = ["ag", "non_res", "resid"] as const;
 export type MatrixSegment = (typeof SEGMENT_KEYS)[number];
+
+/**
+ * The one segment a category chip scopes the matrices to, or `null` when the
+ * chip selects no segment: `all` is no scope, `nbt` is a program that overlaps
+ * every segment, and `other` RINs never occupy a matrix row. A `null` scope
+ * means "render every segment row"; a segment means "render only that row",
+ * because the other rows were filtered out of the payload and would otherwise
+ * print nothing but misleading `—` dashes.
+ */
+export function segmentForCategory(
+  category: CategoryFilter,
+): MatrixSegment | null {
+  switch (category) {
+    case "ag":
+    case "non_res":
+    case "resid":
+      return category;
+    default:
+      return null;
+  }
+}
 
 /** PG&E components that carry a segment; HFP is tracked separately. */
 export const COMPONENT_KEYS = ["bundled", "unbundled"] as const;

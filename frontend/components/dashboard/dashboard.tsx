@@ -10,7 +10,9 @@
 // without its other columns. The component toggle therefore selects which
 // headline renders above the matrices, not what they aggregate. The category
 // chips are a scope on top of that payload: they narrow the matrices and, with
-// them, every drill opened from them.
+// them, every drill opened from them. A segment chip also drops the other
+// segment rows entirely — they hold no RINs in that scope, and an all-dash row
+// would read as missing data rather than as a filtered-out row.
 //
 // Clicking a cell opens the drill below the matrices: the filter pill
 // (breadcrumb, whose last segment is the status tab), the pattern chips ("what
@@ -863,6 +865,7 @@ export function Dashboard() {
                   <>
                     <HealthMatrix
                       rins={scopedRins}
+                      activeCategory={category}
                       selected={drill?.kind === "main" ? drill : null}
                       onCellClick={(cell, selection) =>
                         openDrill(
@@ -878,6 +881,7 @@ export function Dashboard() {
 
                     <NbtMatrix
                       rins={scopedRins}
+                      activeCategory={category}
                       selected={drill?.kind === "nbt" ? drill : null}
                       onCellClick={(cell, selection) =>
                         openDrill(

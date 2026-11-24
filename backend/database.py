@@ -70,7 +70,7 @@ CREATE TABLE IF NOT EXISTS status (
     fetched_at        TEXT NOT NULL
 );
 
--- One row per RIN per fetch, written *before* a fetch overwrites ``status``
+-- One row per RIN per fetch, written *after* a fetch has written ``status``
 -- (see ``record_status_snapshot``). Deliberately no foreign key to ``rins``:
 -- the point of the table is a permanent record, so history has to survive the
 -- deletion of a RIN. ``status`` only keeps today, this keeps every past fetch
@@ -422,10 +422,11 @@ def save_status(
 def record_status_snapshot(conn: sqlite3.Connection) -> int:
     """Copy the current ``status`` table into ``status_history``.
 
-    ``fetch_data.process`` calls this *before* it writes any new status, so one
-    ``fetched_at`` group holds exactly what the database looked like when a
-    fetch started. Diffing the two newest groups is what ``/api/regressions``
-    reports (see ``latest_snapshot_times``).
+    ``fetch_data.process`` calls this *after* it has written and committed the
+    new status rows, so one ``fetched_at`` group holds the result of a completed
+    fetch. Diffing the two newest groups is what ``/api/regressions`` reports
+    (see ``latest_snapshot_times``); snapshotting before the fetch instead would
+    make the window describe the previous run.
 
     ``fetched_at`` is SQLite's UTC ``datetime('now')`` (``YYYY-MM-DD HH:MM:SS``),
     which sorts lexicographically in chronological order -- that is what the

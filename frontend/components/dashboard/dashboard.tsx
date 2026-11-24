@@ -50,6 +50,7 @@ import type {
   CategoryFilter,
   Component,
   Dashboard,
+  RinEntry,
 } from "@/lib/types";
 
 import { AffectedRinsTable } from "./affected-rins-table";
@@ -64,6 +65,7 @@ import { HfpBuckets } from "./hfp-buckets";
 import { NbtMatrix } from "./nbt-matrix";
 import { PatternStrip } from "./pattern-strip";
 import { ProviderTabs } from "./provider-tabs";
+import { RegressionBanner } from "./regression-banner";
 import { useDashboardData } from "./use-dashboard-data";
 
 const ROW_LABELS: Record<MainRowKey, string> = {
@@ -251,7 +253,19 @@ export function Dashboard() {
   const [selectedRins, setSelectedRins] = useState<Set<string>>(
     () => new Set(),
   );
+  // The regression banner's drill: the RINs that regressed in the newest fetch
+  // window. It hangs off the banner (above the provider tabs), not off a matrix
+  // cell, so it owns its open state, status tab and checkbox selection.
+  const [regressionRins, setRegressionRins] = useState<RinEntry[] | null>(null);
+  const [regressionStatus, setRegressionStatus] =
+    useState<RinStatusTab>("missing");
+  const [regressionSelected, setRegressionSelected] = useState<Set<string>>(
+    () => new Set(),
+  );
+  // Bumped when a manual refresh lands, so the banner re-reads its window.
+  const [regressionRefreshKey, setRegressionRefreshKey] = useState(0);
   const drillRef = useRef<HTMLElement>(null);
+  const regressionRef = useRef<HTMLElement>(null);
 
   // Manual refresh: a landed poll stores its payload here, and the hook's own
   // payload (see `data` below) always supersedes it.
@@ -477,6 +491,18 @@ export function Dashboard() {
     drillRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
   }, [drillIdentity, showComponentToggle]);
 
+  // The banner's "View" opens the same table layout above the tabs, so it
+  // scrolls itself into view the way a matrix drill does.
+  useEffect(() => {
+    if (regressionRins === null) {
+      return;
+    }
+    regressionRef.current?.scrollIntoView({
+      behavior: "smooth",
+      block: "start",
+    });
+  }, [regressionRins]);
+
   const drillSegments = useMemo(() => {
     if (!effectiveDrill) {
       return [];
@@ -540,6 +566,22 @@ export function Dashboard() {
     setDrill(null);
     setActiveAttributes(new Set());
     setSelectedRins(new Set());
+  }
+
+  /**
+   * The banner's "View": list the RINs that regressed in the newest fetch, right
+   * under the banner and above the provider tabs. They lost their value in that
+   * fetch, so the table opens on Missing.
+   */
+  function handleViewRegressions(rins: RinEntry[]) {
+    setRegressionRins(rins);
+    setRegressionStatus("missing");
+    setRegressionSelected(new Set());
+  }
+
+  function closeRegressions() {
+    setRegressionRins(null);
+    setRegressionSelected(new Set());
   }
 
   /** The pill's "clear all": drop the drill's filters, keep the drill open. */
@@ -721,6 +763,11 @@ export function Dashboard() {
     setIsRefreshing(false);
     setRefreshMessage(null);
     setPolledData(payload);
+    // The fetch just landed, so the regression window moved: re-read it instead
+    // of keeping the banner the component fetched on mount, and close the drill
+    // that describes the window that just ended.
+    setRegressionRefreshKey((current) => current + 1);
+    closeRegressions();
     setFlashFreshness(true);
     if (flashTimeoutRef.current !== null) {
       clearTimeout(flashTimeoutRef.current);
@@ -781,6 +828,40 @@ export function Dashboard() {
           ) : null}
         </div>
       </header>
+
+      <RegressionBanner
+        onViewClick={handleViewRegressions}
+        refreshKey={regressionRefreshKey}
+      />
+
+      {regressionRins !== null ? (
+        <section
+          ref={regressionRef}
+          aria-label="Regression report"
+          className="mb-6 scroll-mt-6 space-y-3"
+        >
+          <div className="flex items-center justify-between gap-4">
+            <h2 className="text-sm font-semibold text-gray-900">
+              Regressed in the last fetch
+            </h2>
+            <button
+              type="button"
+              onClick={closeRegressions}
+              className="rounded-md border border-gray-200 bg-white px-2 py-1 text-[12px] text-gray-600 transition hover:bg-gray-50"
+            >
+              Close
+            </button>
+          </div>
+          <AffectedRinsTable
+            rins={regressionRins}
+            drillKey="regressions"
+            activeStatusTab={regressionStatus}
+            onStatusTabChange={setRegressionStatus}
+            selectedRins={regressionSelected}
+            onSelectionChange={setRegressionSelected}
+          />
+        </section>
+      ) : null}
 
       {providersState.status === "error" ? (
         <ErrorPanel

@@ -1,5 +1,12 @@
 import { SEGMENT_ORDER } from "@/lib/constants";
-import type { Component, Dashboard, Provider, RinEntry, Segment } from "@/lib/types";
+import type {
+  Component,
+  Dashboard,
+  Provider,
+  RegressionReport,
+  RinEntry,
+  Segment,
+} from "@/lib/types";
 
 /**
  * Map an unknown API value onto the four segments the dashboard groups by.
@@ -101,20 +108,26 @@ export function normalizeProviders(payload: unknown): Provider[] {
   return providers;
 }
 
+/**
+ * The RIN rows of an API list. Entries that are not usable RIN rows are
+ * dropped, so a partial payload can never make the table render a broken row.
+ */
+function toRinEntries(value: unknown): RinEntry[] {
+  return Array.isArray(value)
+    ? value
+        .map(normalizeRinEntry)
+        .filter((entry): entry is RinEntry => entry !== null)
+    : [];
+}
+
 export function normalizeDashboard(
   payload: unknown,
   fallbackProvider: string,
   fallbackComponent: string | null,
 ): Dashboard {
   const raw = (payload ?? {}) as Record<string, unknown>;
-  const toEntries = (value: unknown): RinEntry[] =>
-    Array.isArray(value)
-      ? value
-          .map(normalizeRinEntry)
-          .filter((entry): entry is RinEntry => entry !== null)
-      : [];
-  const failedRins = toEntries(raw.failed_rins);
-  const successfulRins = toEntries(raw.successful_rins);
+  const failedRins = toRinEntries(raw.failed_rins);
+  const successfulRins = toRinEntries(raw.successful_rins);
   const countOr = (value: unknown, fallback: number): number =>
     typeof value === "number" && Number.isFinite(value) ? value : fallback;
 
@@ -130,5 +143,26 @@ export function normalizeDashboard(
     no_value_count: countOr(raw.no_value_count, failedRins.length),
     failed_rins: failedRins,
     successful_rins: successfulRins,
+  };
+}
+
+/**
+ * Normalise `GET /api/regressions`.
+ *
+ * A payload without `has_data: true` becomes an empty report -- the banner
+ * stays hidden until two snapshots exist -- and unusable rows are dropped, so a
+ * half-decoded response can never render a broken banner or table.
+ */
+export function normalizeRegressions(payload: unknown): RegressionReport {
+  const raw = (payload ?? {}) as Record<string, unknown>;
+  const timestamp = (value: unknown): string | null =>
+    typeof value === "string" ? value : null;
+
+  return {
+    has_data: raw.has_data === true,
+    window_start: timestamp(raw.window_start),
+    window_end: timestamp(raw.window_end),
+    regressions: toRinEntries(raw.regressions),
+    recoveries: toRinEntries(raw.recoveries),
   };
 }

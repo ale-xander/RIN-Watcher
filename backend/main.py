@@ -13,8 +13,9 @@ POST /api/admin/fetch queues a MIDAS fetch in the background; it is guarded by
 the FETCH_SECRET environment variable and returns 202 immediately.
 
 GET /api/regressions compares the two newest ``status_history`` snapshots --
-``fetch_data.process`` writes one before each fetch -- and reports the RINs
-that lost a value (regressions) and the ones that gained one (recoveries).
+``fetch_data.process`` writes one after each fetch -- and reports the RINs that
+lost a value (regressions) and the ones that gained one (recoveries), as full
+dashboard rows joined against the live ``rins`` table.
 
 POST /api/ops/preview and POST /api/ops/commit accept the add-only RIN CSV as a
 FormData field named ``file`` and require the ADMIN_PASSWORD environment variable
@@ -292,6 +293,42 @@ def _rin_entry(row: Any) -> dict[str, Any]:
     }
 
 
+def _rin_entries(conn: sqlite3.Connection, rins: list[str]) -> list[dict[str, Any]]:
+    """Full dashboard rows for ``rins``, in the order the list gives them.
+
+    ``status_history`` deliberately has no foreign key to ``rins`` so a snapshot
+    survives a RIN deletion; this join is the other half of that trade-off. It
+    turns the changed RIN strings into rows the affected-RINs table can render
+    (identity, component, status) and drops a RIN deleted since the snapshot
+    instead of reporting a row the dashboard has no other data for.
+
+    A RIN present in ``rins`` but never checked has no ``status`` row; the LEFT
+    JOIN keeps it and ``_rin_entry`` classifies it as ``not_in_midas``.
+    """
+    if not rins:
+        return []
+    placeholders = ", ".join("?" for _ in rins)
+    rows = conn.execute(
+        f"""
+        SELECT r.rin,
+               r.rate_name,
+               r.tariff,
+               r.enrollment_codes,
+               r.category,
+               r.prefix,
+               s.has_value_today,
+               s.last_success_date,
+               s.fetched_at
+        FROM rins AS r
+        LEFT JOIN status AS s ON s.rin = r.rin
+        WHERE r.rin IN ({placeholders})
+        """,
+        rins,
+    ).fetchall()
+    by_rin = {row["rin"]: row for row in rows}
+    return [_rin_entry(by_rin[rin]) for rin in rins if rin in by_rin]
+
+
 def _provider_sort_key(code: str) -> tuple[int, str]:
     """Order tabs by ``PROVIDER_LABELS``, then unknown codes alphabetically."""
     if code in PROVIDER_LABELS:
@@ -451,20 +488,23 @@ def get_dashboard(
 def get_regressions() -> dict[str, Any]:
     """RINs that changed between the last two recorded fetches.
 
-    ``fetch_data.process`` copies ``status`` into ``status_history`` before
-    every fetch, so the two newest ``fetched_at`` groups bracket one fetch:
-    ``window_start`` is what the older snapshot saw and ``window_end`` what the
-    newer one saw (the state the current fetch started from). A *regression* had
-    a value at ``window_start`` and has none at ``window_end``; a *recovery* is
-    the reverse.
+    ``fetch_data.process`` copies ``status`` into ``status_history`` once a
+    fetch has finished writing, so the two newest ``fetched_at`` groups are the
+    results of the two latest fetches: ``window_start`` is what the older fetch
+    ended with and ``window_end`` what the newer one ended with. A *regression*
+    had a value at ``window_start`` and has none at ``window_end``; a *recovery*
+    is the reverse. Because the snapshot is taken after the writes, the newest
+    window already includes the fetch the user just triggered instead of
+    trailing it by one run.
 
     Only RINs present in both snapshots are compared, which is what the gap
     model means by "had a value / is missing": a RIN deleted from ``rins``
-    (and therefore from ``status``) is neither. Both lists are plain RIN
-    strings -- the historical snapshots do not carry rate names or dates, and
-    joining ``rins`` would misreport deleted RINs -- and sorted for a stable
-    banner. ``has_data`` is false, with a ``null`` window, until two snapshots
-    exist.
+    (and therefore from ``status``) is neither. Both lists hold full dashboard
+    rows (see :func:`_rin_entries`) joined against the live ``rins`` table, so
+    the affected-RINs table can render them without a second lookup; a RIN that
+    was deleted after its snapshot drops out of the response. The rows keep the
+    RIN sort order the window query gives them. ``has_data`` is false, with a
+    ``null`` window, until two snapshots exist.
     """
     with closing(get_connection(DB_PATH)) as conn:
         times = latest_snapshot_times(conn, limit=2)
@@ -493,23 +533,23 @@ def get_regressions() -> dict[str, Any]:
             (window_start, window_end),
         ).fetchall()
 
-    regressions = [
-        row["rin"]
-        for row in rows
-        if row["has_value_before"] == 1 and row["has_value_after"] == 0
-    ]
-    recoveries = [
-        row["rin"]
-        for row in rows
-        if row["has_value_before"] == 0 and row["has_value_after"] == 1
-    ]
-    return {
-        "has_data": True,
-        "window_start": window_start,
-        "window_end": window_end,
-        "regressions": regressions,
-        "recoveries": recoveries,
-    }
+        regressions = [
+            row["rin"]
+            for row in rows
+            if row["has_value_before"] == 1 and row["has_value_after"] == 0
+        ]
+        recoveries = [
+            row["rin"]
+            for row in rows
+            if row["has_value_before"] == 0 and row["has_value_after"] == 1
+        ]
+        return {
+            "has_data": True,
+            "window_start": window_start,
+            "window_end": window_end,
+            "regressions": _rin_entries(conn, regressions),
+            "recoveries": _rin_entries(conn, recoveries),
+        }
 
 
 def _run_fetch(db_path: Path, lock: IO[str]) -> None:

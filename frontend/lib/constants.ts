@@ -11,6 +11,8 @@ export const API_BASE_URL = (
 
 export const PROVIDERS_URL = `${API_BASE_URL}/api/providers`;
 export const DASHBOARD_URL = `${API_BASE_URL}/api/dashboard`;
+/** Changed RINs between the two newest recorded fetches (the regression banner). */
+export const REGRESSIONS_URL = `${API_BASE_URL}/api/regressions`;
 
 export const DEFAULT_PROVIDER_ID = "pge";
 export const DEFAULT_COMPONENT: Component = "bundled";

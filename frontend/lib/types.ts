@@ -61,6 +61,23 @@ export type Dashboard = {
   successful_rins: RinEntry[];
 };
 
+/**
+ * Payload of `GET /api/regressions`: the RINs that changed between the two
+ * newest `status_history` snapshots.
+ *
+ * `window_start` and `window_end` are SQLite UTC timestamps of the older and
+ * newer fetch; `has_data` is false until two fetches have run. Both lists hold
+ * full dashboard rows -- the backend joins the changed RINs against the live
+ * `rins` table -- so the affected-RINs table can render them directly.
+ */
+export type RegressionReport = {
+  has_data: boolean;
+  window_start: string | null;
+  window_end: string | null;
+  regressions: RinEntry[];
+  recoveries: RinEntry[];
+};
+
 export type ProvidersState =
   | { status: "loading" }
   | { status: "error"; message: string }

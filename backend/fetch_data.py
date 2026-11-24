@@ -17,12 +17,14 @@ that guard a fetch would resurrect every RIN MIDAS still lists and the active
 count would grow on every run.
 
 For each such RIN the script records whether it published at least one non-null
-value for today (America/Los_Angeles) in the ``status`` table. Before anything
-is fetched, the current ``status`` table is copied into ``status_history``
+value for today (America/Los_Angeles) in the ``status`` table. Once the fetch
+has written its results, the ``status`` table is copied into ``status_history``
 (see :func:`snapshot_status`), so every past fetch stays available and
-``GET /api/regressions`` can report what changed. Test RINs (``-TEST``) already
-in the database are deleted on every run, with their ``status`` rows; real RINs
-that dropped out of the list are kept.
+``GET /api/regressions`` reports what the newest fetch changed. Snapshotting
+*after* the writes, not before them, is what keeps the regression banner
+current: the newest snapshot is this fetch's result. Test RINs (``-TEST``)
+already in the database are deleted on every run, with their ``status`` rows;
+real RINs that dropped out of the list are kept.
 
 Usage:
     python fetch_data.py [--db /path/to/rin_watch.db]
@@ -309,18 +311,21 @@ def fetch_rin_list(session: requests.Session) -> list[tuple[str, str]]:
 
 
 def snapshot_status(db_path: Path | None = None) -> int:
-    """Record the pre-fetch ``status`` table in ``status_history``.
+    """Record the post-fetch ``status`` table in ``status_history``.
 
-    The regression banner diffs the two newest snapshots, so one has to exist
-    *before* the fetch overwrites ``status``: this runs at the very start of
-    :func:`process`, before the RIN list or any rate is requested. The API's
-    background job goes through ``process`` too, so every fetch -- CLI or
+    The regression banner diffs the two newest snapshots, so the newest one has
+    to describe the fetch that just finished: this runs at the very end of
+    :func:`process`, after :func:`_process_locked` has written and committed
+    every status row. A snapshot taken *before* the fetch would leave the banner
+    one run behind -- the window would report the previous fetch's outcome, so a
+    manual Refresh would not change it until the run after. The API's background
+    job goes through ``process`` too, so every fetch -- CLI or
     ``POST /api/admin/fetch`` -- is captured exactly once.
 
     ``init_db`` comes first so a database created before ``status_history``
     existed gets the table; the snapshot itself is taken on a short-lived
-    connection that is committed before any fetch work starts. Returns the
-    number of history rows written (0 on a database with no status yet).
+    connection that is committed once the fetch is done. Returns the number of
+    history rows written (0 on a database with no status yet).
     """
     db_file = init_db(db_path)
     with closing(get_connection(db_path)) as conn:
@@ -349,11 +354,14 @@ def process(db_path: Path | None = None, lock: IO[str] | None = None) -> int:
     if handle is None:
         handle = acquire_fetch_lock(db_path)
     try:
-        # Before the network is touched, pin what the database looks like right
-        # now: the fetch below overwrites it, and /api/regressions diffs that
-        # snapshot against the previous one.
+        exit_code = _process_locked(db_path)
+        # Snapshot the result, not the starting point. _process_locked commits
+        # each RIN's status row as it is checked, so the database now holds what
+        # this fetch found; recording it here makes /api/regressions diff the
+        # two completed fetches instead of lagging one run behind. Snapshotting
+        # before the fetch is what left the banner stale until the next Refresh.
         snapshot_status(db_path)
-        return _process_locked(db_path)
+        return exit_code
     finally:
         if lock is None:
             release_fetch_lock(handle)

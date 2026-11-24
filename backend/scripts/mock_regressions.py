@@ -1,23 +1,29 @@
 #!/usr/bin/env python3
 """Seed ``status_history`` with two fake fetches so the regression banner works.
 
-``fetch_data.process`` snapshots ``status`` into ``status_history`` before every
+``fetch_data.process`` snapshots ``status`` into ``status_history`` after every
 fetch, so a fresh database has no history and ``GET /api/regressions`` returns
-an empty window until a fetch has run. This script inserts a fake "previous
-fetch" and a fake "current fetch" instead::
+an empty window until two fetches have run. This script inserts a fake
+"previous fetch" and a fake "current fetch" instead::
 
     python backend/scripts/mock_regressions.py
     python backend/scripts/mock_regressions.py --clean
 
-Every row uses a RIN ending in ``-MOCK`` and a timestamp at/after *now* (UTC),
-so the two mock snapshots are always the newest ones the API compares. The
-script prints the regressions and recoveries it expects, re-reads the window
-from the database to prove the inserts, and exits non-zero if the two disagree.
-``--clean`` deletes the mock rows again and leaves everything else untouched.
+The API joins the changed RIN strings against ``rins`` and returns full dashboard
+rows, so a mock snapshot has to name RINs that really exist. The script picks
+RINs the dashboard already shows -- two currently missing ones become
+regressions, two healthy ones become recoveries -- so the newest mock snapshot
+agrees with what ``status`` says today. A sentinel RIN (``-MOCK-WINDOW``, which
+no real RIN can match) tags both mock timestamps, which is how ``--clean``
+deletes exactly what a run wrote and never a real snapshot. The timestamps are
+at/after *now* (UTC), so the two mock snapshots are always the newest ones the
+API compares. The script prints the regressions and recoveries it expects,
+re-reads the window from the database to prove the inserts, and exits non-zero
+if the two disagree.
 
 Only ``status_history`` is written: ``rins`` and ``status`` -- i.e. what the
-dashboard shows -- are never modified. Remove the mock rows before the next real
-fetch so the banner goes back to real data.
+dashboard shows and what the fetcher reads -- are never modified. Remove the mock
+rows before the next real fetch so the banner goes back to real data.
 
 The database location is ``--db``, then the ``RIN_WATCH_DB`` environment
 variable, then ``backend/rin_watch.db``.
@@ -40,18 +46,13 @@ if str(BACKEND_DIR) not in sys.path:
 
 from database import get_connection, get_db_path, init_db  # noqa: E402
 
-# (rin, has_value at T_old, has_value at T_new). Two RINs per outcome, so the
-# banner shows both lists without any real fetch having run.
-MOCK_ROWS: tuple[tuple[str, int, int], ...] = (
-    ("USCA-PGPG-9101-MOCK", 1, 0),  # regression
-    ("USCA-PGXX-9102-MOCK", 1, 0),  # regression
-    ("USCA-PGPG-9103-MOCK", 0, 1),  # recovery
-    ("USCA-XXMB-9104-MOCK", 0, 1),  # recovery
-    ("USCA-PGXX-9105-MOCK", 1, 1),  # unchanged: not in either list
-    ("USCA-XXSJ-9106-MOCK", 0, 0),  # unchanged: not in either list
-)
-
-MOCK_SUFFIX = "-MOCK"
+# Two RINs per outcome, so the banner shows both lists without any real fetch
+# having run.
+PICKS_PER_OUTCOME = 2
+# Marks both mock snapshots without naming a RIN: a leading dash is not a valid
+# MIDAS RIN, so it can never collide with one, and the API never reports it (it
+# has the same value in both snapshots, and it is not in ``rins``).
+SENTINEL_RIN = "-MOCK-WINDOW"
 # Time between the two fake fetches; long enough that nobody mistakes the two
 # snapshots for one run, short enough to keep the banner's window readable.
 WINDOW = timedelta(hours=1)
@@ -59,14 +60,56 @@ WINDOW = timedelta(hours=1)
 TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 
-def expected_changes(
-    rows: tuple[tuple[str, int, int], ...] = MOCK_ROWS,
-) -> tuple[list[str], list[str]]:
-    """(regressions, recoveries) implied by ``MOCK_ROWS``.
+def _candidate_rins(conn: sqlite3.Connection) -> tuple[list[str], list[str]]:
+    """(missing, healthy): the live RINs the mock can contradict.
 
-    Computed straight from the constants above -- not from the database and not
-    by the API's SQL -- so re-reading the table below is an independent check
-    of the inserts.
+    The newest mock snapshot repeats what ``status`` says today -- a regressed
+    RIN is missing now, a recovered one has a value now -- so the banner never
+    describes a RIN the rest of the dashboard disagrees about. A RIN with no
+    ``status`` row counts as missing: the dashboard's LEFT JOIN keeps it and
+    classifies it as not-in-MIDAS.
+    """
+    rows = conn.execute(
+        """
+        SELECT r.rin AS rin, s.has_value_today AS has_value_today
+        FROM rins AS r
+        LEFT JOIN status AS s ON s.rin = r.rin
+        ORDER BY r.rin
+        """
+    ).fetchall()
+    missing = [row["rin"] for row in rows if row["has_value_today"] != 1]
+    healthy = [row["rin"] for row in rows if row["has_value_today"] == 1]
+    return missing, healthy
+
+
+def pick_rows(conn: sqlite3.Connection) -> tuple[tuple[str, int, int], ...]:
+    """``(rin, has_value at T_old, has_value at T_new)`` for the mock snapshots.
+
+    Raises ``ValueError`` when the database cannot supply both outcomes, so the
+    CLI can explain why instead of writing half a demo.
+    """
+    missing, healthy = _candidate_rins(conn)
+    if len(missing) < PICKS_PER_OUTCOME or len(healthy) < PICKS_PER_OUTCOME:
+        raise ValueError(
+            f"need {PICKS_PER_OUTCOME} RINs with a value and {PICKS_PER_OUTCOME}"
+            " without one to mock both outcomes"
+            f" (found {len(healthy)} with, {len(missing)} without);"
+            " open the dashboard or run a fetch first"
+        )
+    return tuple(
+        [(rin, 1, 0) for rin in missing[:PICKS_PER_OUTCOME]]
+        + [(rin, 0, 1) for rin in healthy[:PICKS_PER_OUTCOME]]
+    )
+
+
+def expected_changes(
+    rows: tuple[tuple[str, int, int], ...],
+) -> tuple[list[str], list[str]]:
+    """(regressions, recoveries) implied by the mock rows.
+
+    Computed straight from the rows above -- not from the database and not by
+    the API's SQL -- so re-reading the table below is an independent check of
+    the inserts.
     """
     regressions = [rin for rin, old, new in rows if old == 1 and new == 0]
     recoveries = [rin for rin, old, new in rows if old == 0 and new == 1]
@@ -87,11 +130,19 @@ def window_timestamps(now: datetime | None = None) -> tuple[str, str]:
     )
 
 
-def seed_snapshots(conn: sqlite3.Connection, t_old: str, t_new: str) -> int:
+def seed_snapshots(
+    conn: sqlite3.Connection,
+    rows: tuple[tuple[str, int, int], ...],
+    t_old: str,
+    t_new: str,
+) -> int:
     """Write both mock snapshots; returns the number of rows written."""
-    params = [(rin, t_old, old) for rin, old, _ in MOCK_ROWS] + [
-        (rin, t_new, new) for rin, _, new in MOCK_ROWS
+    params = [(rin, t_old, old) for rin, old, _ in rows] + [
+        (rin, t_new, new) for rin, _, new in rows
     ]
+    # The sentinel has the same value in both snapshots, so the window query
+    # never reports it; it exists to tag the timestamps for ``--clean``.
+    params += [(SENTINEL_RIN, t_old, 0), (SENTINEL_RIN, t_new, 0)]
     conn.executemany(
         """
         INSERT OR REPLACE INTO status_history (rin, fetched_at, has_value)
@@ -156,9 +207,19 @@ def changes_in_window(
 
 
 def clean_mock_rows(conn: sqlite3.Connection) -> int:
-    """Delete every ``status_history`` row whose RIN ends in ``-MOCK``."""
+    """Delete every row a previous run wrote, sentinel rows included.
+
+    The mock timestamps are exactly the ones that carry the sentinel, so this
+    removes a run's own snapshots and never a real fetch's.
+    """
     return conn.execute(
-        "DELETE FROM status_history WHERE rin LIKE ?", (f"%{MOCK_SUFFIX}",)
+        """
+        DELETE FROM status_history
+        WHERE fetched_at IN (
+            SELECT fetched_at FROM status_history WHERE rin = ?
+        )
+        """,
+        (SENTINEL_RIN,),
     ).rowcount
 
 
@@ -182,7 +243,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--clean",
         action="store_true",
-        help=f"delete the mock rows (RIN ending in {MOCK_SUFFIX}) and exit",
+        help="delete the rows a previous run wrote and exit",
     )
     parser.add_argument(
         "--db",
@@ -203,20 +264,26 @@ def main(argv: list[str] | None = None) -> int:
         if args.clean:
             removed = clean_mock_rows(conn)
             conn.commit()
-            print(f"Removed {removed} mock row(s) ending in {MOCK_SUFFIX}.")
+            print(f"Removed {removed} mock row(s).")
             return 0
 
+        try:
+            rows = pick_rows(conn)
+        except ValueError as error:
+            print(f"Cannot mock regressions: {error}.", file=sys.stderr)
+            return 1
+
         t_old, t_new = window_timestamps()
-        written = seed_snapshots(conn, t_old, t_new)
+        written = seed_snapshots(conn, rows, t_old, t_new)
         conn.commit()
         sizes = _snapshot_sizes(conn, (t_old, t_new))
         actual = changes_in_window(conn, t_old, t_new)
 
     print(f"Wrote {written} row(s) into status_history:")
     for label, timestamp in (("T_old", t_old), ("T_new", t_new)):
-        print(f"  {label} {timestamp} -> {sizes.get(timestamp, 0)} RIN(s)")
+        print(f"  {label} {timestamp} -> {sizes.get(timestamp, 0)} row(s)")
 
-    expected = expected_changes()
+    expected = expected_changes(rows)
     print()
     _print_list("Expected regressions", expected[0])
     _print_list("Expected recoveries", expected[1])

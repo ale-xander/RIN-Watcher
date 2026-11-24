@@ -42,16 +42,3 @@ export function getVintage(
   }
   return null;
 }
-
-/**
- * Strips the bare "NBT" code when a vintage code is present.
- * NBT alone carries no information once a vintage is known.
- */
-export function stripRedundantNbt(
-  enrollmentCodes: string[] | null | undefined,
-): string[] {
-  if (!enrollmentCodes || enrollmentCodes.length === 0) return [];
-  const hasVintage = enrollmentCodes.some((c) => VINTAGE_RE.test(c));
-  if (!hasVintage) return [...enrollmentCodes];
-  return enrollmentCodes.filter((c) => c !== "NBT");
-}

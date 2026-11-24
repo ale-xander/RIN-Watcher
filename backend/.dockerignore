@@ -5,3 +5,6 @@ __pycache__/
 .venv/
 *.db
 *.db.bak-*
+# RIN data lives in SQLite (and git history); spreadsheets never belong in the
+# image.
+*.xlsx

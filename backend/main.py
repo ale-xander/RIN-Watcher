@@ -85,7 +85,7 @@ ADMIN_TOKEN_HEADER = "X-Admin-Token"
 MAX_OPS_UPLOAD_BYTES = 5 * 1024 * 1024
 
 # Tab labels rendered by the frontend. A provider code missing from this map
-# (e.g. a new CCA that shows up in the spreadsheet) still gets a tab: the code
+# (e.g. a new CCA that shows up in an uploaded CSV) still gets a tab: the code
 # itself is upper-cased instead of being dropped.
 PROVIDER_LABELS = {
     "pge": "PG&E",
@@ -97,10 +97,10 @@ PROVIDER_LABELS = {
 # PG&E RINs are split across three tabs: PGPG is bundled (PG&E supplies both
 # delivery and generation), PGXX is unbundled (a CCA supplies the generation;
 # the RIN itself is still owned/fetched by PG&E) and HFP is the Hourly Flex
-# Pricing rate. HFP RINs come from ``HFP RINs.xlsx`` and carry a bucket-aware
-# rate name (``HFP - Bundled Secondary``, ``HFP - CCA Prices``, ...) instead of a
-# tariff, so the tab is selected by rate-name prefix. CCAs have no such split, so
-# ``?component=`` is ignored for them.
+# Pricing rate. HFP RINs carry a bucket-aware rate name (``HFP - Bundled
+# Secondary``, ``HFP - CCA Prices``, ...) instead of a tariff, so the tab is
+# selected by rate-name prefix. CCAs have no such split, so ``?component=`` is
+# ignored for them.
 PGE_PROVIDER_CODE = "pge"
 COMPONENT_PREFIXES = {"bundled": "PGPG", "unbundled": "PGXX"}
 HFP_COMPONENT = "hfp"
@@ -221,8 +221,8 @@ def _parse_enrollment_codes(value: str | None) -> list[str]:
 def _rin_prefix(row: Any) -> str:
     """The RIN's prefix: the stored column, else its second dash segment.
 
-    RINs registered by ``fetch_data`` before the first spreadsheet import have
-    an empty ``prefix`` column, so the RIN itself is the fallback.
+    RINs registered by ``fetch_data`` before the first CSV import have an empty
+    ``prefix`` column, so the RIN itself is the fallback.
     """
     prefix = (row["prefix"] or "").strip().upper()
     if prefix:
@@ -234,10 +234,10 @@ def _rin_prefix(row: Any) -> str:
 def _rin_component(row: Any) -> str | None:
     """Derive a RIN's PG&E component from the RIN, not from the query param.
 
-    HFP RINs are recognised by their rate name, which the HFP sheet writes as
+    HFP RINs are recognised by their rate name, which the importer writes as
     ``HFP - <bucket>`` (this also covers the CCA buckets, whose RIN prefixes are
     not in ``HFP_RIN_PREFIXES``). The 38xx series remains a fallback for rows
-    imported before the bucket-aware sheet. CCA-owned RINs (XXMB, XXSJ, XXPC, ...)
+    imported before the bucket-aware rate names. CCA-owned RINs (XXMB, XXSJ, ...)
     return ``None`` on purpose: ``unbundled`` names PG&E's PGXX delivery half, not
     a CCA's generation half, so conflating the two would mislabel every CCA RIN
     and break the delivery/generation pairing.
@@ -341,7 +341,7 @@ def get_providers() -> list[dict[str, Any]]:
     """Provider tabs the frontend should render, one per active RIN owner.
 
     Only providers with at least one ``is_active = 1`` RIN are returned, so a
-    CCA that disappears from the spreadsheet also loses its tab. PG&E advertises
+    CCA that disappears from a CSV import also loses its tab. PG&E advertises
     its bundled/unbundled/HFP split through ``components``; CCAs return an empty
     list because each one owns a single RIN prefix.
     """
@@ -381,7 +381,7 @@ def get_dashboard(
 
     ``?component=bundled`` keeps only PGPG RINs, ``?component=unbundled`` only
     PGXX RINs and ``?component=hfp`` only RINs whose rate name starts with
-    ``HFP - `` (one bucket per HFP sheet column; HFP RINs have no prefix of their
+    ``HFP - `` (one bucket per HFP rate name; HFP RINs have no prefix of their
     own). ``?component=all``, or no component at all, returns every active RIN of
     the provider -- for a CCA, which has no split, a component is ignored either
     way. Every row carries its own ``component``, derived from the RIN instead of
@@ -407,7 +407,7 @@ def get_dashboard(
             # HFP RINs share the PGPG/PGXX prefixes but their ``prefix`` column
             # is empty, so they are selected by rate-name prefix instead. LIKE
             # with a trailing wildcard also matches rows imported before the
-            # bucket-aware sheet (rate name was ``HFP - RTP``).
+            # bucket-aware rate names (rate name was ``HFP - RTP``).
             filters.append("r.rate_name LIKE ?")
             params.append(f"{HFP_RATE_PREFIX}%")
         else:
@@ -475,10 +475,6 @@ def get_dashboard(
         "total": len(rows),
         "has_value_count": len(successes),
         "no_value_count": len(failures),
-        # Legacy names, kept until the frontend reads the counts above.
-        "total_rins": len(rows),
-        "success_count": len(successes),
-        "failed_count": len(failures),
         "failed_rins": [_rin_entry(row) for row in failures],
         "successful_rins": [_rin_entry(row) for row in successes],
     }

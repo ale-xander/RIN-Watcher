@@ -9,14 +9,12 @@
 // repeat the one segment left on screen. A dash inside a rendered row still
 // means "0 RINs in this bucket", which is exactly what a missing NBT vintage is.
 
+import type { MainColKey, MainRowKey } from "@/lib/drill";
 import { buildMainMatrix, segmentForCategory } from "@/lib/health-matrix";
 import type { MatrixCell } from "@/lib/health-matrix";
 import type { CategoryFilter, RinEntry } from "@/lib/types";
 
 import { MatrixCellView, MatrixHeadline } from "./matrix-cell";
-
-export type MainRowKey = "ag" | "non_res" | "resid" | "all";
-export type MainColKey = "bundled" | "unbundled" | "all";
 
 export interface MainMatrixSelection {
   row: MainRowKey;

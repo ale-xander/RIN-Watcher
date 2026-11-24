@@ -10,6 +10,7 @@
 // `All NBT` footer goes with the hidden rows: with one segment visible it would
 // simply repeat that segment's totals.
 
+import type { NbtColKey, NbtRowKey } from "@/lib/drill";
 import {
   NBT_ROW_KEYS,
   NBT_VINTAGES,
@@ -21,9 +22,6 @@ import type { NbtVintage } from "@/lib/nbt-vintage";
 import type { CategoryFilter, RinEntry } from "@/lib/types";
 
 import { MatrixCellView, MatrixHeadline } from "./matrix-cell";
-
-export type NbtRowKey = NbtBodyRowKey | "all";
-export type NbtColKey = NbtVintage | "all";
 
 export interface NbtMatrixSelection {
   row: NbtRowKey;

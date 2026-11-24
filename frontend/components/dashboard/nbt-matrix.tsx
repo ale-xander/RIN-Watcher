@@ -6,7 +6,9 @@
 // payload to that segment, so only its two rows (bundled + unbundled) render:
 // the other segments were filtered out and would print nothing but `—` dashes.
 // The vintage columns and their dashes are untouched — a dash under 2023 still
-// means "0 RINs of this vintage exist", which is the signal worth keeping.
+// means "0 RINs of this vintage exist", which is the signal worth keeping. The
+// `All NBT` footer goes with the hidden rows: with one segment visible it would
+// simply repeat that segment's totals.
 
 import {
   NBT_ROW_KEYS,
@@ -81,8 +83,9 @@ export function NbtMatrix({
   const matrix = buildNbtMatrix(rins);
 
   // Row keys are `<component>-<segment>` and neither part contains a dash, so a
-  // matching suffix is the segment. The `All NBT` footer and the vintage
-  // columns keep rendering either way.
+  // matching suffix is the segment. The vintage columns keep rendering either
+  // way; the `All NBT` footer only renders while no segment is scoped, since it
+  // would otherwise repeat the rows left on screen.
   const segment = segmentForCategory(activeCategory);
   const bodyRows =
     segment === null
@@ -152,15 +155,19 @@ export function NbtMatrix({
               </tr>
             ))}
 
-            <tr className="bg-gray-50/40 border-t border-gray-200">
-              <th
-                scope="row"
-                className="whitespace-nowrap p-2 align-top text-sm font-bold text-gray-900"
-              >
-                All NBT
-              </th>
-              {renderCells("all")}
-            </tr>
+            {/* With one segment visible the `All NBT` footer would print the
+                same numbers twice, so it renders in the unscoped view alone. */}
+            {segment === null ? (
+              <tr className="bg-gray-50/40 border-t border-gray-200">
+                <th
+                  scope="row"
+                  className="whitespace-nowrap p-2 align-top text-sm font-bold text-gray-900"
+                >
+                  All NBT
+                </th>
+                {renderCells("all")}
+              </tr>
+            ) : null}
           </tbody>
         </table>
       </div>

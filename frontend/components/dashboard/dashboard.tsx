@@ -12,7 +12,8 @@
 // chips are a scope on top of that payload: they narrow the matrices and, with
 // them, every drill opened from them. A segment chip also drops the other
 // segment rows entirely — they hold no RINs in that scope, and an all-dash row
-// would read as missing data rather than as a filtered-out row.
+// would read as missing data rather than as a filtered-out row. The totals
+// footer goes with them, since it would only repeat the one segment on screen.
 //
 // Clicking a cell opens the drill below the matrices: the filter pill
 // (breadcrumb, whose last segment is the status tab), the pattern chips ("what

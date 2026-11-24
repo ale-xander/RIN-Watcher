@@ -47,9 +47,10 @@ export type MatrixSegment = (typeof SEGMENT_KEYS)[number];
  * The one segment a category chip scopes the matrices to, or `null` when the
  * chip selects no segment: `all` is no scope, `nbt` is a program that overlaps
  * every segment, and `other` RINs never occupy a matrix row. A `null` scope
- * means "render every segment row"; a segment means "render only that row",
- * because the other rows were filtered out of the payload and would otherwise
- * print nothing but misleading `—` dashes.
+ * means "render every segment row plus the totals footer"; a segment means
+ * "render only that row", because the other rows were filtered out of the
+ * payload and would otherwise print nothing but misleading `—` dashes — and the
+ * footer would only repeat the one row left on screen.
  */
 export function segmentForCategory(
   category: CategoryFilter,

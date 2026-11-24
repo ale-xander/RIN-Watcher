@@ -5,8 +5,9 @@
 // The parent also passes the active category chip. A segment chip scopes the
 // payload to that segment, so rendering the other rows would fill them with
 // `—` dashes that read as "missing data" instead of "filtered out": those rows
-// are not rendered at all. A dash inside a rendered row still means "0 RINs in
-// this bucket", which is exactly what a missing NBT vintage is.
+// are not rendered at all, and neither is the totals footer, which would just
+// repeat the one segment left on screen. A dash inside a rendered row still
+// means "0 RINs in this bucket", which is exactly what a missing NBT vintage is.
 
 import { buildMainMatrix, segmentForCategory } from "@/lib/health-matrix";
 import type { MatrixCell } from "@/lib/health-matrix";
@@ -54,8 +55,9 @@ export function HealthMatrix({
 }) {
   const matrix = buildMainMatrix(rins);
 
-  // Only the chip's own segment renders; the totals row and every column stay,
-  // so the "All segments" figures still reconcile with the row above them.
+  // Only the chip's own segment renders. The columns (and their `—` dashes for
+  // empty buckets) stay; the totals footer would only repeat the single visible
+  // row, so it is rendered in the unscoped view alone.
   const segment = segmentForCategory(activeCategory);
   const segmentRows =
     segment === null
@@ -126,15 +128,19 @@ export function HealthMatrix({
               </tr>
             ))}
 
-            <tr className="bg-gray-50/40 border-t border-gray-200">
-              <th
-                scope="row"
-                className="whitespace-nowrap px-3 py-2 align-top text-sm font-bold text-gray-900"
-              >
-                All segments
-              </th>
-              {renderCells("all")}
-            </tr>
+            {/* With one segment visible the totals row would print the same
+                numbers twice, so it renders in the unscoped view alone. */}
+            {segment === null ? (
+              <tr className="bg-gray-50/40 border-t border-gray-200">
+                <th
+                  scope="row"
+                  className="whitespace-nowrap px-3 py-2 align-top text-sm font-bold text-gray-900"
+                >
+                  All segments
+                </th>
+                {renderCells("all")}
+              </tr>
+            ) : null}
           </tbody>
         </table>
       </div>
